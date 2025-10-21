@@ -1,0 +1,9 @@
+.pixi/
+__pycache__/
+.runs/
+runs/
+figures/
+data/
+*.pt
+*.zip
+*.csv
