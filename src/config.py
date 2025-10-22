@@ -23,7 +23,7 @@ class Config:
     target_cols = ["PM10_ug_per_m3","PM2_5_ug_per_m3","PM1_ug_per_m3"]
 
     # model
-    model_type: str = "lstm"     # or "gru"
+    model_type: str = "gru"     # lstm or "gru"
     hidden_size: int = 128
     num_layers: int = 2          # dropout only active if >1
     dropout: float = 0.2
