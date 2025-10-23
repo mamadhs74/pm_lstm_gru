@@ -32,3 +32,4 @@ See `src/config.py` for: input window, stride, target shift τ (default 20 s), d
 - Checkpoints in `.runs/` (best by event‑weighted MAE)
 - Plots in `figures/` (residuals, regime MAE, prediction overlays)
 - CSVs of metrics per fold and per regime
+
