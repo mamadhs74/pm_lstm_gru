@@ -7,3 +7,10 @@ data/
 *.pt
 *.zip
 *.csv
+data/
+runs/
+.runs/
+figures/
+*.pt
+*.joblib
+*.parquet
