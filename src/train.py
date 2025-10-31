@@ -85,7 +85,7 @@ def train_one_split(train_df, val_df, device):
     epoch_train_losses, epoch_val_losses, grad_norms = [], [], []
 
     use_amp = torch.cuda.is_available()
-    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
     print(" starting training loop")
     try:
@@ -96,35 +96,50 @@ def train_one_split(train_df, val_df, device):
             for xb, yb in train_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 opt.zero_grad(set_to_none=True)
-                with torch.cuda.amp.autocast(enabled=use_amp):
+
+                if use_amp:
+                    with torch.amp.autocast("cuda"):
+                        pred = model(xb)
+                        loss = criterion(pred, yb)
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(opt)
+                    scaler.update()
+                else:
                     pred = model(xb)
                     loss = criterion(pred, yb)
-                scaler.scale(loss).backward()
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(opt); scaler.update()
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    opt.step()
 
                 if global_step % 50 == 0:
                     log_gradients_tb(writer, model, step=global_step)
 
-                # global grad norm (diagnostic)
                 total_sq = 0.0
                 for p in model.parameters():
                     if p.grad is not None:
                         g = p.grad.detach().flatten()
                         total_sq += float(torch.dot(g, g))
                 batch_grad_norms.append(np.sqrt(total_sq))
-                batch_losses.append(loss.item())
+                batch_losses.append(float(loss.detach().cpu()))
                 global_step += 1
 
-            # validation
+            # ---- validation ----
             model.eval()
             vloss = []
             with torch.no_grad():
-                for xb, yb in val_loader:
-                    xb, yb = xb.to(device), yb.to(device)
-                    vloss.append(criterion(model(xb), yb).item())
+                if use_amp:
+                    with torch.amp.autocast("cuda"):
+                        for xb, yb in val_loader:
+                            xb, yb = xb.to(device), yb.to(device)
+                            vloss.append(criterion(model(xb), yb).item())
+                else:
+                    for xb, yb in val_loader:
+                        xb, yb = xb.to(device), yb.to(device)
+                        vloss.append(criterion(model(xb), yb).item())
 
+            # ---- compute & log epoch metrics, step LR, track best ----
             mtrain = float(np.mean(batch_losses)) if batch_losses else float("nan")
             mval   = float(np.mean(vloss))        if vloss        else float("nan")
             epoch_train_losses.append(mtrain)
@@ -139,6 +154,8 @@ def train_one_split(train_df, val_df, device):
             if mval < best_val:
                 best_val = mval
                 best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+
+
     finally:
         plot_training_curves(epoch_train_losses, epoch_val_losses, "figures/training_curves.png")
         plot_grad_norms(grad_norms, "figures/grad_norms.png")
@@ -193,6 +210,8 @@ def main():
         out_dim=len(targs),
     ).to(device)
     model.load_state_dict(torch.load(ckpt, map_location=device))
+        # Safety: the human-friendly labels (cfg.target_cols) must match the model output order/length
+    assert len(targs) == len(cfg.target_cols), "Resolved targets and display names must have same length."
 
     df_pred = predict_loader_to_df(model, val_loader, cfg.target_cols, device)
     if not df_pred.empty:
