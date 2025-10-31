@@ -11,6 +11,7 @@ train = "python -m src.train --config ./src/config.py"
 tensorboard = "tensorboard --logdir runs --port 6006"
 train_stream = "python -m src.train_stream --config ./src/config.py"
 report = "python -m src.report_plots"
+report2 = "python -m src.report2"
 
 [dependencies]
 python = ">=3.10,<3.13"

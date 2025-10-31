@@ -14,3 +14,11 @@ figures/
 *.pt
 *.joblib
 *.parquet
+
+# Ignore Windows ADS detritus
+*Zone.Identifier
+* - Copy.py:Zone.Identifier
+
+# Ignore Windows ADS detritus
+*Zone.Identifier
+* - Copy.py:Zone.Identifier
