@@ -26,6 +26,20 @@ def compute_friction_work_from_df(df: pd.DataFrame, cfg) -> Tuple[np.ndarray, np
     v_s = _ma(v, cfg.physics_ma_window)
     dt = np.diff(t, prepend=t[0])
     ax = _grad(v_s, t)
+        # --- dynamic front share from longitudinal weight transfer (optional) ---
+    use_dyn = bool(getattr(cfg, "use_dynamic_brake_share", False))
+    if use_dyn:
+        h_cg = float(getattr(cfg, "cg_height_m", 0.62))
+        Lwb  = float(getattr(cfg, "wheelbase_m", 3.0))
+        # Δshare = (ax * h_cg) / (L * g)  (adds under braking, subtracts under accel)
+        delta_share = (ax * h_cg) / (max(Lwb, 1e-6) * g)
+        beta_dyn = beta0 + delta_share
+        beta_min = float(getattr(cfg, "beta_clip_min", 0.50))
+        beta_max = float(getattr(cfg, "beta_clip_max", 0.90))
+        beta = np.clip(beta_dyn, beta_min, beta_max)
+    else:
+        beta = beta0
+
 
     # grade (radians), optional
     if cfg.alt_col in df.columns:
@@ -35,9 +49,14 @@ def compute_friction_work_from_df(df: pd.DataFrame, cfg) -> Tuple[np.ndarray, np
     else:
         grade = np.zeros_like(v_s)
 
-    m, g = float(cfg.vehicle_mass_kg), 9.81
-    rho, CdA, Crr = float(cfg.rho_air), float(cfg.CdA), float(cfg.Crr)
-    reff, beta = float(cfg.brake_reff_m), float(cfg.brake_beta_front)
+    m     = float(cfg.vehicle_mass_kg)
+    g     = float(getattr(cfg, "g", 9.80665))  # use your measured gravity
+    rho   = float(cfg.rho_air)
+    CdA   = float(cfg.CdA)
+    Crr   = float(cfg.Crr)
+    reff  = float(cfg.brake_reff_m)
+    beta0 = float(cfg.brake_beta_front)        # baseline front share
+
 
     # Forces
     Fr = Crr * m * g * np.cos(grade)     # rolling

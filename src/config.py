@@ -55,34 +55,61 @@ class Config:
     alt_col: str    = "altitude_m"  # optional, for grade
     dist_col: str   = "distance_m"  # optional, for grade fallback
 
-    # ---- your measured vehicle geometry (used for future extensions / load transfer) ----
-    # Radstand (wheelbase) = 3000 mm
-    wheelbase_m: float = 3.000
+    # ===== Vehicle geometry & measured constants =====
+    # gravity (your value)
+    g: float = 9.80665
 
-    # Spurweite (track width). You provided ranges + 30 mm spacers per side.
-    # We'll store approximate *final* tracks (mm → m). Adjust if you have exact final values.
-    track_front_m: float = (1_628 + 0.060)  / 1000.0  # ~1628 mm + 60 mm total spacer ≈ 1.688 m
-    track_rear_m:  float = (1_634 + 0.060)  / 1000.0  # ~1634 mm + 60 mm total spacer ≈ 1.694 m
+    # wheelbase (m)
+    wheelbase_m: float = 3.0
 
-    # Reifenradius from 255/45 R18:
-    # 18" rim = 457.2 mm; sidewall = 0.45 * 255 = 114.75 mm → diameter ≈ 457.2 + 2*114.75 = 686.7 mm
-    # radius ≈ 343.35 mm = 0.343 m
-    wheel_radius_m: float = 0.343
+    # track widths (m). Use midpoints of your ranges (spacers handled in those ranges already).
+    # front: 1622–1634 mm → ~1.628 m
+    # rear : 1628–1640 mm → ~1.634 m
+    track_front_m: float = (1622.0 + 1634.0) / 2000.0
+    track_rear_m:  float = (1628.0 + 1640.0) / 2000.0
 
-    # Bremskraftverteilung (front share) unknown → keep typical value
-    brake_beta_front: float = 0.6  # tune if you measure it
+    # tire radius from 255/45 R18 (mm → m): 18" rim (457.2 mm) + 2*114.75 mm sidewalls → radius ≈ 0.343 m
+    wheel_radius_m: float = (457.2 + 2 * 114.75) / 2000.0
 
-    # ---- physics / environment constants (edit if you know better) ----
-    vehicle_mass_kg: float = 1600.0
-    brake_reff_m: float    = 0.15     # effective brake radius (caliper/disc)
-    rho_air: float         = 1.225
-    CdA: float             = 0.65     # drag coeff * area
-    Crr: float             = 0.012    # rolling resistance
+    # PM probe height (m)
+    probe_height_m: float = 0.13
 
-    # ---- physics-baseline options ----
+    # corner weights (kg) you measured
+    weight_fl_kg: float = 681.0
+    weight_fr_kg: float = 630.0
+    weight_rl_kg: float = 464.5
+    weight_rr_kg: float = 484.0
+
+    # total mass from corner weights (kg)
+    vehicle_mass_kg: float = weight_fl_kg + weight_fr_kg + weight_rl_kg + weight_rr_kg  # ≈ 2259.5
+
+    # longitudinal CG from front axle (m): (rear mass / total) * wheelbase
+    cg_longitudinal_m: float = ((weight_rl_kg + weight_rr_kg) / vehicle_mass_kg) * wheelbase_m  # ≈ 1.26 m
+
+    # vertical CG height estimate (m). Increase to ~0.65–0.70 when heavily loaded.
+    cg_height_m: float = 0.62
+
+    # braking distribution baseline (front share)
+    brake_beta_front: float = 0.60
+
+    # effective brake radius (m) (caliper/disc)
+    brake_reff_m: float = 0.15
+
+    # environment / drag
+    rho_air: float = 1.225
+    CdA: float     = 0.65
+    Crr: float     = 0.012
+
+    # ===== physics-baseline options =====
     physics_ma_window: int = 5
     grade_smooth_window: int = 9
-    use_physics_baseline: bool = True  # trains on (PM - PF * W_spec)
+    use_physics_baseline: bool = True  # train on (PM - PF * W_spec)
+
+    # (optional) dynamic front share using simple longitudinal weight transfer
+    use_dynamic_brake_share: bool = True   # set True to enable
+    beta_clip_min: float = 0.50
+    beta_clip_max: float = 0.90
+
 
 def resolved_feature_cols(cfg: Config):
     return cfg.feature_cols + ["idle", "brake_event", "dv", "jerk"]
