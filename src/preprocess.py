@@ -1,7 +1,7 @@
 # src/preprocess.py
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import RobustScaler
+from sklearn.preprocessing import RobustScaler, StandardScaler
 from typing import Dict
 from .config import cfg
 from .physics import fit_pf_per_target, apply_physics_baseline
@@ -83,23 +83,50 @@ def shift_phys_targets(df: pd.DataFrame, cfg):
     return out.reset_index(drop=True)
 
 def prepare_frames(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    # 1) resample + regimes
     df = downsample(df, cfg.orig_hz, cfg.target_hz)
     df = add_regime_features(df)
+
+    # 2) split
     splits = leak_free_split(df, cfg)
 
+    # 3) scale features (fit on train only)
     scaler = fit_transformers(splits["train"], cfg)
     for k in ("train", "val", "test"):
         splits[k] = apply_transformers(splits[k], scaler, cfg)
 
-    # EMA baseline
+    # 4) EMA residuals (optional baseline)
     for k in ("train", "val", "test"):
         splits[k] = build_residual_targets(splits[k], cfg)
         splits[k] = shift_ema_targets(splits[k], cfg)
 
-    # Physics-guided residuals (Feißel)
+    # 5) physics-guided residuals (recommended)
     if getattr(cfg, "use_physics_baseline", False):
-        splits = build_physics_residuals(splits)
+        splits = build_physics_residuals(splits)       # adds *_phys and *_resid_phys
         for k in ("train", "val", "test"):
             splits[k] = shift_phys_targets(splits[k], cfg)
 
+    # 6) === NEW: scale the final target columns actually fed to the model ===
+    from .config import resolved_target_cols
+    targ_cols = resolved_target_cols(cfg)  # e.g., ["PM10_ug_per_m3_resid_shift", ...] or phys variant
+
+    t_scaler = fit_target_scaler(splits["train"], targ_cols)     # fit on TRAIN only
+    for k in ("train", "val", "test"):
+        splits[k] = apply_target_scaler(splits[k], targ_cols, t_scaler)
+
+    # optionally stash for later (not required)
+    splits["_target_scaler"] = t_scaler
+
     return splits
+
+def fit_target_scaler(train_df: pd.DataFrame, target_cols):
+    """Fit a scaler on TRAIN targets (residual target columns actually fed to the model)."""
+    sc = StandardScaler()
+    sc.fit(train_df[target_cols].values)
+    return sc
+
+def apply_target_scaler(df: pd.DataFrame, target_cols, sc: StandardScaler):
+    """Apply the target scaler (same columns, same order) to any split."""
+    out = df.copy()
+    out.loc[:, target_cols] = sc.transform(out[target_cols].values)
+    return out

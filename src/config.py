@@ -33,15 +33,17 @@ class Config:
     conv_channels: int = 64
 
     # ---- training ----
+    # training
     batch_size: int = 256
-    max_epochs: int = 60
+    max_epochs: int = 80            # keep high; early stopping will cut it
+    early_stopping_patience: int = 10
     lr: float = 1e-3
     weight_decay: float = 1e-5
 
-    # ---- loss / regime weights ----
+    # loss / weights
     use_huber: bool = True
     huber_delta: float = 1.0
-    regime_weights = {"idle": 0.7, "brake": 2.0, "cruise": 1.0}
+    regime_weights = {"idle": 1.2, "brake": 1.8, "cruise": 1.0}  # (optional tweak)
 
     # ---- CV / splitting ----
     n_folds: int = 5

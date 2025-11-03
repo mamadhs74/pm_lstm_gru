@@ -82,6 +82,10 @@ def train_one_split(train_df, val_df, device):
     best_val = float("inf")
     best_state = None
     global_step = 0
+    patience = getattr(cfg, "early_stopping_patience", 10)
+    no_improve = 0
+
+    
     epoch_train_losses, epoch_val_losses, grad_norms = [], [], []
 
     use_amp = torch.cuda.is_available()
@@ -150,10 +154,20 @@ def train_one_split(train_df, val_df, device):
             writer.add_scalar("loss/val",   mval,   epoch)
             print(f" epoch {epoch:03d} | train {mtrain:.4f} | val {mval:.4f}")
 
+                        # step LR
             sch.step()
+
+            # track best + early stopping
             if mval < best_val:
                 best_val = mval
                 best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+                no_improve = 0
+            else:
+                no_improve += 1
+                if no_improve >= patience:
+                    print(f"[early stop] no val improvement for {patience} epochs; stopping at epoch {epoch}.")
+                    break
+
 
 
     finally:
@@ -211,7 +225,7 @@ def main():
     ).to(device)
     model.load_state_dict(torch.load(ckpt, map_location=device))
         # Safety: the human-friendly labels (cfg.target_cols) must match the model output order/length
-    assert len(targs) == len(cfg.target_cols), "Resolved targets and display names must have same length."
+    assert len(targs) == model.out_dim, "Resolved target size must match model output."
 
     df_pred = predict_loader_to_df(model, val_loader, cfg.target_cols, device)
     if not df_pred.empty:

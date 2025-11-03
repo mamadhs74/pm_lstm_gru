@@ -22,3 +22,6 @@ figures/
 # Ignore Windows ADS detritus
 *Zone.Identifier
 * - Copy.py:Zone.Identifier
+
+# Ignore Windows ADS sidecar files
+*:[Zz]one.Identifier

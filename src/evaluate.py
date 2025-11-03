@@ -70,23 +70,23 @@ def main():
     # Build test dataset (windowing identical to train)
     window = int(cfg.window_s * cfg.target_hz)
     stride = int(cfg.stride_steps)
+    feat_cols = resolved_feature_cols(cfg)          
+    targ_cols = resolved_target_cols(cfg)   
 
-    feats = resolved_feature_cols(cfg)   # feature cols incl. regimes
-    targs = resolved_target_cols(cfg)    # residual target column names (EMA or physics)
 
     test_df = splits["test"].reset_index(drop=True)
-    test_ds = WindowedDataset(test_df, feats, targs, window, stride)
+    test_ds = WindowedDataset(test_df, feat_cols, targ_cols, window, stride)
 
     # Load best checkpoint
     model = RNNRegressor(
-        input_size=len(feats),
+        input_size=len(feat_cols),
         hidden_size=cfg.hidden_size,
         num_layers=cfg.num_layers,
         dropout=cfg.dropout,
         rnn_type=cfg.model_type,
         conv_frontend=cfg.conv_frontend,
         conv_channels=cfg.conv_channels,
-        out_dim=len(targs),
+        out_dim=len(targ_cols),
     ).to(device)
     ckpt = f".runs/{cfg.model_type}_best.pt"
     model.load_state_dict(torch.load(ckpt, map_location=device))
@@ -155,17 +155,24 @@ def main():
     print(" - figures/parity_pm25_test.png")
     print(" - figures/resid_hist_pm25_test.png")
 
-    # --- Optional: if hybrid columns exist, you can add more plots here
-    # Example: overlay total prediction vs truth in *physical* space for PM10
-    base = "PM10"
-    if f"{base}_pred_total" in pred_df.columns:
-        df_hybrid = pd.DataFrame({
-            f"{base}_true": pred_df[f"{base}_true"].values + pred_df[f"{base}_phys"].values,  # convert residual truth -> physical truth
-            f"{base}_pred": pred_df[f"{base}_pred_total"].values
-        })
-        plot_overlay(df_hybrid, "figures/overlay_test_pm10_hybrid.png",
-                     title="Test — PM10 total (hybrid vs truth)")
-        print(" - figures/overlay_test_pm10_hybrid.png")
+    # --- Optional: Hybrid overlays in PHYSICAL units (physics + residual) ---
+    # Works only if physics baseline columns were added by prepare_frames()
+    # and copied into pred_df by _predict_df(..., test_df_for_phys=test_df).
+    if any(f"{_base_name(t)}_phys" in pred_df.columns for t in display_names):
+        for t in display_names:
+            base = _base_name(t)  # "PM10", "PM2_5", "PM1"
+            phys_col = f"{base}_phys"
+            if phys_col in pred_df.columns:
+                y_phys = pred_df[phys_col].to_numpy(dtype=float)
+                y_true_tot = y_phys + pred_df[f"{base}_true"].to_numpy(dtype=float)  # residual truth -> physical
+                y_pred_tot = y_phys + pred_df[f"{base}_pred"].to_numpy(dtype=float)  # residual pred  -> physical
+
+                df_hybrid = pd.DataFrame({f"{base}_true": y_true_tot, f"{base}_pred": y_pred_tot})
+                out_png = f"figures/overlay_test_{base.lower()}_hybrid.png"
+                plot_overlay(df_hybrid, out_png, title=f"Test — {base} total (hybrid vs truth)")
+                print(f" - {out_png}")
+
+
 
 if __name__ == "__main__":
     main()
