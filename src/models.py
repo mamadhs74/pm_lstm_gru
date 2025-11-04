@@ -20,6 +20,7 @@ class ConvFrontEnd(nn.Module):
 class RNNRegressor(nn.Module):
     def __init__(self, input_size, hidden_size=96, num_layers=1, dropout=0.2, rnn_type='lstm', conv_frontend=True, conv_channels=64, out_dim=3):
         super().__init__()
+        self.out_dim = out_dim
         self.conv_frontend = ConvFrontEnd(input_size, conv_channels) if conv_frontend else None
         rnn_input = conv_channels if conv_frontend else input_size
         if rnn_type == 'lstm':
