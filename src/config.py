@@ -19,7 +19,7 @@ class Config:
     # ---- feature/target columns (clean CSV names) ----
     feature_cols = [
         "speed_kmh","acc_long_ms2","brake_bar","yaw_deg_s",
-        "acc_lat_g","steer_rate_deg_s","rpm","ambient_temp_c",
+         "acc_lat_ms2","steer_rate_deg_s","rpm","ambient_temp_c",
         "wheel_fl_kmh","wheel_fr_kmh","wheel_rl_kmh","wheel_rr_kmh",
     ]
     target_cols = ["PM10_ug_per_m3","PM2_5_ug_per_m3","PM1_ug_per_m3"]
@@ -61,7 +61,7 @@ class Config:
 
     # wheelbase (m)
     wheelbase_m: float = 3.0
-
+    h_cg_m: float         = 0.62     
     # track widths (m). Use midpoints of your ranges (spacers handled in those ranges already).
     # front: 1622–1634 mm → ~1.628 m
     # rear : 1628–1640 mm → ~1.634 m

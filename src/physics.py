@@ -21,55 +21,56 @@ def compute_grade_from_alt(time_s, alt_m, dist_m=None, smooth=9):
     return _ma(np.arctan2(adot, sdot), smooth)
 
 def compute_friction_work_from_df(df: pd.DataFrame, cfg) -> Tuple[np.ndarray, np.ndarray]:
-    t = df[cfg.time_col].to_numpy(float)
-    v = df[cfg.speed_col].to_numpy(float) * (1000.0 / 3600.0)  # km/h → m/s
+    """
+    Compute cumulative brake friction work [J] and specific [J/kg].
+    Uses speed (km/h), time (s), optional altitude (m) for grade.
+    """
+    # --- pull constants up-front (so they exist before use) ---
+    g    = float(getattr(cfg, "g", 9.80665))           # gravity
+    Lwb  = float(getattr(cfg, "wheelbase_m", 3.0))     # wheelbase [m]
+    h_cg = float(getattr(cfg, "h_cg_m", 0.62))         # CG height [m]
+
+    # --- basic kinematics ---
+    t   = df[cfg.time_col].to_numpy(float)
+    v   = df[cfg.speed_col].to_numpy(float) * (1000.0 / 3600.0)  # km/h → m/s
     v_s = _ma(v, cfg.physics_ma_window)
-    dt = np.diff(t, prepend=t[0])
-    ax = _grad(v_s, t)
-        # --- dynamic front share from longitudinal weight transfer (optional) ---
-    use_dyn = bool(getattr(cfg, "use_dynamic_brake_share", False))
-    if use_dyn:
-        h_cg = float(getattr(cfg, "cg_height_m", 0.62))
-        Lwb  = float(getattr(cfg, "wheelbase_m", 3.0))
-        # Δshare = (ax * h_cg) / (L * g)  (adds under braking, subtracts under accel)
-        delta_share = (ax * h_cg) / (max(Lwb, 1e-6) * g)
-        beta_dyn = beta0 + delta_share
-        beta_min = float(getattr(cfg, "beta_clip_min", 0.50))
-        beta_max = float(getattr(cfg, "beta_clip_max", 0.90))
-        beta = np.clip(beta_dyn, beta_min, beta_max)
-    else:
-        beta = beta0
+    dt  = np.diff(t, prepend=t[0])
+    ax  = _grad(v_s, t)  # longitudinal accel [m/s^2]
 
-
-    # grade (radians), optional
+    # --- road grade (radians), optional ---
     if cfg.alt_col in df.columns:
-        alt = df[cfg.alt_col].to_numpy(float)
+        alt  = df[cfg.alt_col].to_numpy(float)
         dist = df[cfg.dist_col].to_numpy(float) if cfg.dist_col in df.columns else None
         grade = compute_grade_from_alt(t, alt, dist, cfg.grade_smooth_window)
     else:
         grade = np.zeros_like(v_s)
 
-    m     = float(cfg.vehicle_mass_kg)
-    g     = float(getattr(cfg, "g", 9.80665))  # use your measured gravity
-    rho   = float(cfg.rho_air)
-    CdA   = float(cfg.CdA)
-    Crr   = float(cfg.Crr)
-    reff  = float(cfg.brake_reff_m)
-    beta0 = float(cfg.brake_beta_front)        # baseline front share
+    # --- vehicle + environment parameters ---
+    m    = float(cfg.vehicle_mass_kg)
+    rho  = float(cfg.rho_air)
+    CdA  = float(cfg.CdA)
+    Crr  = float(cfg.Crr)
+    reff = float(cfg.brake_reff_m)
+    beta = float(cfg.brake_beta_front)
 
+    # --- resistive + inertial forces ---
+    Fr    = Crr * m * g * np.cos(grade)      # rolling
+    Fa    = 0.5 * rho * CdA * (v_s**2)       # aerodynamic
+    Fg    = m * g * np.sin(grade)            # grade
+    F_long= m * ax                           # inertial (m*a)
 
-    # Forces
-    Fr = Crr * m * g * np.cos(grade)     # rolling
-    Fa = 0.5 * rho * CdA * (v_s**2)      # aero
-    Fg = m * g * np.sin(grade)           # grade
-    F_long = m * ax                      # inertia
+    # (optional) simple longitudinal load-transfer share (not used directly below)
+    # Safe and non-breaking; remove if you don't need it.
+    delta_share = (ax * h_cg) / (max(Lwb, 1e-6) * g)   # dimensionless
 
-    # Brake force only when needed (decel after resistances)
-    F_brake = np.maximum(0.0, -(F_long + Fa + Fr + Fg))
-    T_brake_front = beta * F_brake * reff
-    P_brake = T_brake_front * (v_s / reff)       # W
-    W_fric = np.cumsum(P_brake * dt)             # J
-    W_spec = W_fric / m                          # J/kg
+    # --- brake force only when the net required force is negative (deceleration) ---
+    F_brake = np.maximum(0.0, -(F_long + Fa + Fr + Fg))   # [N]
+
+    # assume front axle share 'beta' of brake force; torque at wheel radius
+    T_brake_front = beta * F_brake * reff                 # [N*m]
+    P_brake = T_brake_front * (v_s / reff)                # [W] = torque * wheel angular speed
+    W_fric = np.cumsum(P_brake * dt)                      # [J]
+    W_spec = W_fric / m                                   # [J/kg]
     return W_fric, W_spec
 
 def fit_pf_linear(work: np.ndarray, pm: np.ndarray) -> float:
