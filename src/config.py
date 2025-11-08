@@ -24,21 +24,26 @@ class Config:
     ]
     target_cols = ["PM10_ug_per_m3","PM2_5_ug_per_m3","PM1_ug_per_m3"]
 
-    # ---- model (choose "lstm" or "gru") ----
-    model_type: str = "lstm"
-    hidden_size: int = 128
-    num_layers: int = 2
+        # ---- model ----
+    model_type: str = "tcn"  # "lstm", "gru", or "tcn"
+    hidden_size: int = 128       # used by RNN
+    num_layers: int = 2          # used by RNN
     dropout: float = 0.2
-    conv_frontend: bool = True
-    conv_channels: int = 64
+    conv_frontend: bool = True   # used by RNN
+    conv_channels: int = 64      # used by RNN
+
+    # ---- TCN-specific ----
+    tcn_channels = (64, 64, 64)  # per residual block (dilations 1,2,4,…)
+    tcn_kernel_size: int = 3
+
 
     # ---- training ----
     # training
     batch_size: int = 256
-    max_epochs: int = 80            # keep high; early stopping will cut it
-    early_stopping_patience: int = 10
-    lr: float = 1e-3
-    weight_decay: float = 1e-5
+    max_epochs: int = 120            
+    early_stopping_patience: int = 5
+    lr: float = 3e-4   
+    weight_decay: float = 1e-5  
 
     # loss / weights
     use_huber: bool = True
@@ -47,7 +52,7 @@ class Config:
 
     # ---- CV / splitting ----
     n_folds: int = 5
-    purge_seconds: int = 60
+    purge_seconds: int = 120
 
     # ---- column names (time/speed/alt/dist) ----
     time_col: str   = "time_s"
@@ -103,7 +108,7 @@ class Config:
     # ===== physics-baseline options =====
     physics_ma_window: int = 5
     grade_smooth_window: int = 9
-    use_physics_baseline: bool = True  # train on (PM - PF * W_spec)
+    use_physics_baseline: bool = False  # train on (PM - PF * W_spec)
 
     # (optional) dynamic front share using simple longitudinal weight transfer
     use_dynamic_brake_share: bool = True   # set True to enable

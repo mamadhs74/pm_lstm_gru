@@ -12,7 +12,7 @@ from .grad_viz import make_writer, log_gradients_tb
 from .config import cfg, resolved_feature_cols, resolved_target_cols
 from .preprocess import prepare_frames
 from .datasets import make_loaders, WindowedDataset
-from .models import RNNRegressor
+from .models import RNNRegressor, TCNRegressor
 from .metrics import mae, HuberLoss
 from .visualize import plot_overlay, plot_training_curves, plot_grad_norms
 
@@ -61,16 +61,29 @@ def train_one_split(train_df, val_df, device):
     # Model
     feats = resolved_feature_cols(cfg)
     targs = resolved_target_cols(cfg)
-    model = RNNRegressor(
-        input_size=len(feats),
-        hidden_size=cfg.hidden_size,
-        num_layers=cfg.num_layers,
-        dropout=cfg.dropout,
-        rnn_type=cfg.model_type,
-        conv_frontend=cfg.conv_frontend,
-        conv_channels=cfg.conv_channels,
-        out_dim=len(targs),
-    ).to(device)
+
+    if cfg.model_type.lower() in ("lstm", "gru"):
+        model = RNNRegressor(
+            input_size=len(feats),
+            hidden_size=cfg.hidden_size,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            rnn_type=cfg.model_type,
+            conv_frontend=cfg.conv_frontend,
+            conv_channels=cfg.conv_channels,
+            out_dim=len(targs),
+        ).to(device)
+    elif cfg.model_type.lower() == "tcn":
+        model = TCNRegressor(
+            input_size=len(feats),
+            out_dim=len(targs),
+            channels_list=getattr(cfg, "tcn_channels", (64, 64, 64)),
+            kernel_size=getattr(cfg, "tcn_kernel_size", 3),
+            dropout=cfg.dropout,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
+
 
     run_name = f"{cfg.model_type}_hz{cfg.target_hz}_win{cfg.window_s}"
     writer: SummaryWriter = make_writer(logdir="runs", run_name=run_name)
@@ -206,38 +219,43 @@ def main():
     torch.save(best["state"], ckpt)
     print(f" saved best model to {ckpt}")
 
-    # quick val overlay (residual targets)
+    # quick val overlay (residual targets) — build the SAME model type we trained
     from torch.utils.data import DataLoader
     pin = torch.cuda.is_available()
     val_ds = WindowedDataset(splits["val"], feats, targs, window, stride)
     val_loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
                             drop_last=False, num_workers=2, pin_memory=pin)
 
-    model = RNNRegressor(
-        input_size=len(feats),
-        hidden_size=cfg.hidden_size,
-        num_layers=cfg.num_layers,
-        dropout=cfg.dropout,
-        rnn_type=cfg.model_type,
-        conv_frontend=cfg.conv_frontend,
-        conv_channels=cfg.conv_channels,
-        out_dim=len(targs),
-    ).to(device)
-    model.load_state_dict(torch.load(ckpt, map_location=device))
-        # Safety: the human-friendly labels (cfg.target_cols) must match the model output order/length
-    assert len(targs) == model.out_dim, "Resolved target size must match model output."
-
-    df_pred = predict_loader_to_df(model, val_loader, cfg.target_cols, device)
-    if not df_pred.empty:
-        out_csv = "data/processed/val_predictions_residuals.csv"
-        df_pred.to_csv(out_csv, index=False)
-        plot_overlay(df_pred, "figures/overlay_val_residuals.png",
-                     title="Validation — residuals (true vs pred)")
-        print(" wrote:\n  - figures/training_curves.png\n  - figures/grad_norms.png\n"
-              "  - figures/overlay_val_residuals.png\n"
-              f"  - {out_csv}")
+    if cfg.model_type.lower() in ("lstm", "gru"):
+        model = RNNRegressor(
+            input_size=len(feats),
+            hidden_size=cfg.hidden_size,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            rnn_type=cfg.model_type,
+            conv_frontend=cfg.conv_frontend,
+            conv_channels=cfg.conv_channels,
+            out_dim=len(targs),
+        ).to(device)
+    elif cfg.model_type.lower() == "tcn":
+        model = TCNRegressor(
+            input_size=len(feats),
+            out_dim=len(targs),
+            channels_list=getattr(cfg, "tcn_channels", (64, 64, 64)),
+            kernel_size=getattr(cfg, "tcn_kernel_size", 3),
+            dropout=cfg.dropout,
+        ).to(device)
     else:
-        print(" [warn] validation predictions empty (no windows).")
+        raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
+
+    model.load_state_dict(torch.load(ckpt, map_location=device))
+
+    # Optional sanity check without relying on a custom attribute:
+    with torch.no_grad():
+        xb0, _ = next(iter(val_loader))
+        y0 = model(xb0.to(device))
+        assert y0.shape[-1] == len(targs), f"Model outputs {y0.shape[-1]} dims, expected {len(targs)}"
+
 
 if __name__ == "__main__":
     main()
