@@ -10,72 +10,42 @@ import torch
 # -----------------------------
 # 1) BINNED MAE vs a feature
 # -----------------------------
-def binned_mae(y_true, y_pred, by_values, bins, out_png, xlabel="Speed (km/h)"):
+def binned_mae(y_true, y_pred, by, nbins, out_png):
     """
-    Compute MAE in bins of 'by_values' and plot.
-    Robust to:
-      - constant/near-constant by_values (fallback to single MAE),
-      - duplicates in bin edges (dropped),
-      - NaNs (ignored).
+    Compute MAE in bins of a conditioning variable `by` (e.g., brake_bar),
+    then plot MAE vs bin center.
     """
-    y_true = np.asarray(y_true).ravel()
-    y_pred = np.asarray(y_pred).ravel()
-    by_values = np.asarray(by_values).ravel()
+    import numpy as np
+    import pandas as pd
+    import matplotlib.pyplot as plt
 
-    # Drop any rows with NaN in any of the three vectors
-    m = ~(np.isnan(y_true) | np.isnan(y_pred) | np.isnan(by_values))
-    y_true, y_pred, by_values = y_true[m], y_pred[m], by_values[m]
+    df = pd.DataFrame({"y_true": y_true, "y_pred": y_pred, "by": by})
+    # robust bin edges: fall back to unique-only if distribution is degenerate
+    q = np.linspace(0, 1, nbins + 1)
+    edges = np.unique(np.quantile(df["by"].to_numpy(float), q))
+    if edges.size < 2:  # all identical
+        edges = np.array([df["by"].min() - 1e-9, df["by"].max() + 1e-9])
 
-    # If there is no variance (or too few points), fallback to a single bar
-    if len(by_values) < 5 or np.nanstd(by_values) < 1e-9:
-        mae_val = float(np.mean(np.abs(y_true - y_pred))) if len(y_true) else np.nan
-        plt.figure(figsize=(5, 4))
-        plt.bar(["global"], [mae_val])
-        plt.ylabel("MAE")
-        plt.title("Binned MAE (degenerate feature: using global MAE)")
-        plt.tight_layout()
-        plt.savefig(out_png, dpi=150)
-        plt.close()
-        return
+    df["bin"] = pd.cut(df["by"], bins=edges, include_lowest=True, duplicates="drop")
+    grp = df.groupby("bin", observed=True)
 
-    # Build bin edges
-    if isinstance(bins, int):
-        # Use quantile bins for robustness, then drop duplicates
-        qs = np.linspace(0, 1, bins + 1)
-        edges = np.quantile(by_values, qs)
-        edges = np.unique(edges)  # ensure strictly increasing
-    else:
-        edges = np.unique(np.asarray(bins))
+    # compute MAE per bin without triggering FutureWarning
+    mae = (
+        grp[["y_true", "y_pred"]]
+        .apply(lambda g: np.mean(np.abs(g["y_true"] - g["y_pred"])))
+        .rename("MAE")
+        .reset_index()
+    )
 
-    # If still not enough unique edges, fallback
-    if edges.size < 2:
-        mae_val = float(np.mean(np.abs(y_true - y_pred))) if len(y_true) else np.nan
-        plt.figure(figsize=(5, 4))
-        plt.bar(["global"], [mae_val])
-        plt.ylabel("MAE")
-        plt.title("Binned MAE (insufficient unique edges: global MAE)")
-        plt.tight_layout()
-        plt.savefig(out_png, dpi=150)
-        plt.close()
-        return
+    centers = []
+    for iv in mae["bin"]:
+        # iv is a pandas.Interval
+        centers.append((iv.left + iv.right) / 2.0)
+    mae["center"] = centers
 
-    # Cut into bins, dropping any remaining duplicate edges
-    d = pd.DataFrame({"y_true": y_true, "y_pred": y_pred, "by": by_values})
-    d["bin"] = pd.cut(d["by"], bins=edges, include_lowest=True, duplicates="drop")
-
-    grp = d.groupby("bin", observed=True)
-    mae = grp.apply(lambda g: np.mean(np.abs(g["y_true"] - g["y_pred"]))).rename("MAE").reset_index()
-
-    # Bin centers for plotting
-    mids = []
-    for interval in mae["bin"]:
-        mids.append((float(interval.left) + float(interval.right)) / 2.0)
-    x = np.array(mids)
-    y = mae["MAE"].values
-
-    plt.figure(figsize=(6, 4))
-    plt.plot(x, y, marker="o")
-    plt.xlabel(xlabel)
+    plt.figure()
+    plt.plot(mae["center"].to_numpy(float), mae["MAE"].to_numpy(float), marker="o")
+    plt.xlabel("Binning variable")
     plt.ylabel("MAE")
     plt.title("Binned MAE")
     plt.grid(True, alpha=0.3)
