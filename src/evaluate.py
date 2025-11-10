@@ -7,7 +7,8 @@ from torch.utils.data import DataLoader
 from src.config import cfg, resolved_feature_cols, resolved_target_cols
 from src.preprocess import prepare_frames
 from src.datasets import WindowedDataset
-from src.models import RNNRegressor
+# top of file: add TCNRegressor to the import
+from src.models import RNNRegressor, TCNRegressor
 from src.visualize import plot_overlay, plot_parity, plot_residual_hist
 from src.diagnostics import regime_metrics
 
@@ -77,20 +78,37 @@ def main():
     test_df = splits["test"].reset_index(drop=True)
     test_ds = WindowedDataset(test_df, feat_cols, targ_cols, window, stride)
 
-    # Load best checkpoint
-    model = RNNRegressor(
-        input_size=len(feat_cols),
-        hidden_size=cfg.hidden_size,
-        num_layers=cfg.num_layers,
-        dropout=cfg.dropout,
-        rnn_type=cfg.model_type,
-        conv_frontend=cfg.conv_frontend,
-        conv_channels=cfg.conv_channels,
-        out_dim=len(targ_cols),
-    ).to(device)
-    ckpt = f".runs/{cfg.model_type}_best.pt"
+        # --- Build the model that matches cfg.model_type and load its checkpoint ---
+    feats = resolved_feature_cols(cfg)
+    targs = resolved_target_cols(cfg)
+
+    mt = cfg.model_type.lower()
+    if mt in ("lstm", "gru"):
+        model = RNNRegressor(
+            input_size=len(feats),
+            hidden_size=cfg.hidden_size,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            rnn_type=cfg.model_type,          # "lstm" or "gru"
+            conv_frontend=cfg.conv_frontend,
+            conv_channels=cfg.conv_channels,
+            out_dim=len(targs),
+        ).to(device)
+    elif mt == "tcn":
+        model = TCNRegressor(
+            input_size=len(feats),
+            out_dim=len(targs),
+            channels_list=getattr(cfg, "tcn_channels", (64, 64, 64)),
+            kernel_size=getattr(cfg, "tcn_kernel_size", 3),
+            dropout=cfg.dropout,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
+
+    ckpt = f".runs/{cfg.model_type}_best.pt"   # e.g., .runs/tcn_best.pt
     model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
+
 
     # Decide the human-friendly display order (corresponds to cfg.target_cols)
     # even though the model is trained on residual columns (targs)
