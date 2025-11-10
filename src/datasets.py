@@ -54,6 +54,11 @@ from torch.utils.data import DataLoader
 # (optionally) you can also import samplers if you prefer explicit control:
 # from torch.utils.data import RandomSampler, SequentialSampler
 
+# src/datasets.py
+from torch.utils.data import DataLoader
+# (optionally) you can also import samplers if you prefer explicit control:
+# from torch.utils.data import RandomSampler, SequentialSampler
+
 def make_loaders(train_df, val_df, cfg):
     """
     Build train/val WindowedDataset and DataLoaders without relying on a dataset.sampler().
@@ -89,3 +94,4 @@ def make_loaders(train_df, val_df, cfg):
     )
 
     return train_loader, val_loader
+
