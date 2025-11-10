@@ -11,7 +11,8 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 from src.config import cfg, resolved_feature_cols, resolved_target_cols
 from src.preprocess import prepare_frames
 from src.datasets import WindowedDataset
-from src.models import RNNRegressor
+from src.models import RNNRegressor, TCNRegressor
+
 
 # Extra plots/utilities you created in report_more.py
 from src.report_more import (
@@ -81,19 +82,33 @@ def main():
 
     test_ds = WindowedDataset(test_df, feat_cols, targ_cols, window, stride)
 
-    # 2) Load model
+        # 2) Load model (match training config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = RNNRegressor(
-        input_size=len(feat_cols),
-        hidden_size=cfg.hidden_size,
-        num_layers=cfg.num_layers,
-        dropout=cfg.dropout,
-        rnn_type=cfg.model_type,
-        conv_frontend=cfg.conv_frontend,
-        conv_channels=cfg.conv_channels,
-        out_dim=len(targ_cols),
-    ).to(device)
-    ckpt = f".runs/{cfg.model_type}_best.pt"
+    mt = cfg.model_type.lower()
+
+    if mt in ("lstm", "gru"):
+        model = RNNRegressor(
+            input_size=len(feat_cols),
+            hidden_size=cfg.hidden_size,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            rnn_type=cfg.model_type,          # "lstm" or "gru"
+            conv_frontend=cfg.conv_frontend,
+            conv_channels=cfg.conv_channels,
+            out_dim=len(targ_cols),
+        ).to(device)
+    elif mt == "tcn":
+        model = TCNRegressor(
+            input_size=len(feat_cols),
+            out_dim=len(targ_cols),
+            channels_list=getattr(cfg, "tcn_channels", (64, 64, 64)),
+            kernel_size=getattr(cfg, "tcn_kernel_size", 3),
+            dropout=cfg.dropout,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
+
+    ckpt = f".runs/{cfg.model_type}_best.pt"   # e.g. .runs/tcn_best.pt
     model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
 

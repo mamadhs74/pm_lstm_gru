@@ -13,29 +13,44 @@ import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 
-from .config import cfg, resolved_feature_cols, resolved_target_cols
+from src.config import cfg, resolved_feature_cols, resolved_target_cols
 from .preprocess import prepare_frames
 from .datasets import WindowedDataset
-from .models import RNNRegressor
+from src.models import RNNRegressor, TCNRegressor
 from .physics import fit_pf_per_target, apply_physics_baseline
 
 # ---------------------------
 # Helpers: model + predictions (official PyTorch eval loop pattern)
 # ---------------------------
 
-def _build_model(device, out_dim):
-    model = RNNRegressor(
-        input_size=len(cfg.feature_cols) + 4,  # + idle, brake_event, dv, jerk
-        hidden_size=cfg.hidden_size,
-        num_layers=cfg.num_layers,
-        dropout=cfg.dropout,
-        rnn_type=cfg.model_type,
-        conv_frontend=cfg.conv_frontend,
-        conv_channels=cfg.conv_channels,
-        out_dim=out_dim,
-    ).to(device)
-    ckpt_path = f".runs/{cfg.model_type}_best.pt"
-    state = torch.load(ckpt_path, map_location=device)
+def _build_model(device, out_dim: int):
+    mt = cfg.model_type.lower()
+    feats = resolved_feature_cols(cfg)
+
+    if mt in ("lstm", "gru"):
+        model = RNNRegressor(
+            input_size=len(feats),
+            hidden_size=cfg.hidden_size,
+            num_layers=cfg.num_layers,
+            dropout=cfg.dropout,
+            rnn_type=cfg.model_type,          # "lstm" or "gru"
+            conv_frontend=cfg.conv_frontend,
+            conv_channels=cfg.conv_channels,
+            out_dim=out_dim,
+        ).to(device)
+    elif mt == "tcn":
+        model = TCNRegressor(
+            input_size=len(feats),
+            out_dim=out_dim,
+            channels_list=getattr(cfg, "tcn_channels", (64, 64, 64)),
+            kernel_size=getattr(cfg, "tcn_kernel_size", 3),
+            dropout=cfg.dropout,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
+
+    ckpt = f".runs/{cfg.model_type}_best.pt"   # e.g. .runs/tcn_best.pt
+    state = torch.load(ckpt, map_location=device)
     model.load_state_dict(state)
     model.eval()
     return model
