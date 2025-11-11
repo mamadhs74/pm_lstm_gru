@@ -6,6 +6,47 @@ from typing import Dict
 from .config import cfg
 from .physics import fit_pf_per_target, apply_physics_baseline
 
+def canonicalize_units_and_names(df: pd.DataFrame, cfg) -> pd.DataFrame:
+    """
+    Map your raw CSV's German column names to the canonical names your pipeline expects,
+    and normalize units to SI (notably: lateral accel in g -> m/s^2).
+    This is a pure 'add columns (and unit convert) if present' step; it won't break
+    files that already use canonical names.
+    """
+    out = df.copy()
+
+    # 1) Straight renames / copies (if source exists and target not present)
+    colmap = {
+        "Velocity_[km\\h]":               "speed_kmh",
+        "BR8_Laengsbeschl_[m\\s2]":       "acc_long_ms2",
+        "BR5_Bremsdruck_[bar]":           "brake_bar",
+        "BR5_Giergeschw_[Grad\\s]":       "yaw_deg_s",
+        "LW1_Lenk_Gesch_[Grad\\s]":       "steer_rate_deg_s",
+        "MO1_Drehzahl_[1\\min]":          "rpm",
+        "KO2_Aussen_T_[Grad_Celsius]":    "ambient_temp_c",
+        "BR3_Rad_VL_[km\\h]":             "wheel_fl_kmh",  # vorne links
+        "BR3_Rad_VR_[km\\h]":             "wheel_fr_kmh",  # vorne rechts
+        "BR3_Rad_HL_[km\\h]":             "wheel_rl_kmh",  # hinten links
+        "BR3_Rad_HR_[km\\h]":             "wheel_rr_kmh",  # hinten rechts
+        "Altitude_WGS_84_[m]":            "altitude_m",
+        "Distance_[m]":                   "distance_m",
+        "X_Achse_[s]":                    "time_s",
+        # If you ever need UTC timestamps instead, you can derive time_s from there.
+    }
+    for src, dst in colmap.items():
+        if src in out.columns and dst not in out.columns:
+            out[dst] = out[src].astype(float)
+
+    # 2) Lateral acceleration: convert g -> m/s^2 into acc_lat_ms2
+    if "acc_lat_ms2" not in out.columns:
+        if "BR2_Querbeschl_[g]" in out.columns:
+            out["acc_lat_ms2"] = out["BR2_Querbeschl_[g]"].astype(float) * float(getattr(cfg, "g", 9.80665))
+        elif "acc_lat_g" in out.columns:
+            out["acc_lat_ms2"] = out["acc_lat_g"].astype(float) * float(getattr(cfg, "g", 9.80665))
+        # else: leave missing; your later code will fill NaN/0 or raise if truly required
+
+    return out
+
 def build_physics_residuals(splits: dict) -> dict:
     pf = fit_pf_per_target(splits["train"], cfg)
     for k in ("train", "val", "test"):
@@ -83,6 +124,8 @@ def shift_phys_targets(df: pd.DataFrame, cfg):
     return out.reset_index(drop=True)
 
 def prepare_frames(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    # 0) NEW: normalize units and create canonical columns our pipeline expects
+    df = canonicalize_units_and_names(df, cfg)
     # 1) resample + regimes
     df = downsample(df, cfg.orig_hz, cfg.target_hz)
     df = add_regime_features(df)

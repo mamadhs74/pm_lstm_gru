@@ -14,7 +14,7 @@ class Config:
     target_hz: int = 5
     window_s: int = 40           # 200 steps @5 Hz
     target_shift_s: int = 20     # predict t+20 s
-    stride_steps: int = 5        # 1 s stride @5 Hz
+    stride_steps: int = 10        # 1 s stride @5 Hz
 
     # ---- feature/target columns (clean CSV names) ----
     feature_cols = [
@@ -28,22 +28,22 @@ class Config:
     model_type: str = "tcn"  # "lstm", "gru", or "tcn"
     hidden_size: int = 128       # used by RNN
     num_layers: int = 2          # used by RNN
-    dropout: float = 0.2
+    dropout: float = 0.4
     conv_frontend: bool = True   # used by RNN
     conv_channels: int = 64      # used by RNN
 
     # ---- TCN-specific ----
-    tcn_channels = (64, 64, 64)  # per residual block (dilations 1,2,4,…)
+    tcn_channels = (64,64,64,64,64,64)  # per residual block (dilations 1,2,4,…)
     tcn_kernel_size: int = 3
 
 
     # ---- training ----
     # training
     batch_size: int = 256
-    max_epochs: int = 120            
-    early_stopping_patience: int = 5
-    lr: float = 3e-4   
-    weight_decay: float = 1e-5  
+    max_epochs: int = 80            
+    early_stopping_patience: int = 10
+    lr: float = 5e-4  
+    weight_decay: float = 1e-4  
 
     # loss / weights
     use_huber: bool = True
@@ -52,7 +52,7 @@ class Config:
 
     # ---- CV / splitting ----
     n_folds: int = 5
-    purge_seconds: int = 120
+    purge_seconds: int = 180
 
     # ---- column names (time/speed/alt/dist) ----
     time_col: str   = "time_s"
