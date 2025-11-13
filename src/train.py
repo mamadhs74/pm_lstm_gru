@@ -58,7 +58,7 @@ def train_one_split(train_df, val_df, device):
     if n_train == 0 or n_val == 0:
         raise RuntimeError("No windows in train/val. Adjust window/shift/CSV length.")
 
-    # ----- model -----
+    # ---------- Model ----------
     feats = resolved_feature_cols(cfg)
     targs = resolved_target_cols(cfg)
 
@@ -84,14 +84,22 @@ def train_one_split(train_df, val_df, device):
     else:
         raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
 
-    
-
     run_name = f"{cfg.model_type}_hz{cfg.target_hz}_win{cfg.window_s}"
     writer: SummaryWriter = make_writer(logdir="runs", run_name=run_name)
+
     opt = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sch = CosineAnnealingLR(opt, T_max=cfg.max_epochs)
-    criterion = HuberLoss(cfg.huber_delta) if cfg.use_huber else mae
-   
+
+    # ---------- Loss setup ----------
+    use_hetero = bool(getattr(cfg, "use_heteroscedastic", False)) and cfg.model_type.lower() == "tcn"
+    if use_hetero:
+        # TCN outputs (mu, log_var); we penalize Gaussian NLL
+        criterion = GaussianNLLLoss(full=True)
+        print("[info] using heteroscedastic Gaussian NLL loss for TCN")
+    else:
+        criterion = HuberLoss(cfg.huber_delta) if cfg.use_huber else mae
+        print("[info] using", "Huber loss" if cfg.use_huber else "MAE loss")
+
     best_val = float("inf")
     best_state = None
     global_step = 0
@@ -100,12 +108,10 @@ def train_one_split(train_df, val_df, device):
 
     epoch_train_losses, epoch_val_losses, grad_norms = [], [], []
 
-    use_amp = torch.cuda.is_available()
-    scaler = torch.amp.GradScaler("cuda") if use_amp else None
-
     print(" starting training loop")
     try:
         for epoch in range(cfg.max_epochs):
+            # ======= TRAIN =======
             model.train()
             batch_losses, batch_grad_norms = [], []
 
@@ -113,24 +119,21 @@ def train_one_split(train_df, val_df, device):
                 xb, yb = xb.to(device), yb.to(device)
                 opt.zero_grad(set_to_none=True)
 
-                if use_amp:
-                    with torch.amp.autocast("cuda"):
-                        if use_hetero:
-                            mu, logv = model(xb)
-                            var = torch.exp(logv).clamp_min(1e-6)
-                            loss = criterion(mu, yb, var)
-                        else:
-                            pred = model(xb)
-                            loss = criterion(pred, yb)
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(opt)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(opt)
-                    scaler.update()
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    opt.step()
+                if use_hetero:
+                    # model returns (mu, log_var)
+                    mu, logv = model(xb)
+                    var = torch.exp(logv).clamp_min(1e-6)
+                    loss = criterion(mu, yb, var)
+                else:
+                    pred = model(xb)
+                    loss = criterion(pred, yb)
 
+                # backprop
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                opt.step()
+
+                # grad diagnostics
                 if global_step % 50 == 0:
                     log_gradients_tb(writer, model, step=global_step)
 
@@ -143,33 +146,20 @@ def train_one_split(train_df, val_df, device):
                 batch_losses.append(float(loss.detach().cpu()))
                 global_step += 1
 
-            # ---- validation ----
+            # ======= VALIDATION =======
             model.eval()
             vloss = []
             with torch.no_grad():
-                if use_amp:
-                    with torch.amp.autocast("cuda"):
-                        for xb, yb in val_loader:
-                            xb, yb = xb.to(device), yb.to(device)
-                            if use_hetero:
-                                mu, logv = model(xb)
-                                var = torch.exp(logv).clamp_min(1e-6)
-                                vloss.append(criterion(mu, yb, var).item())
-                            else:
-                                pred = model(xb)
-                                vloss.append(criterion(pred, yb).item())
-                else:
-                    for xb, yb in val_loader:
-                        xb, yb = xb.to(device), yb.to(device)
-                        if use_hetero:
-                            mu, logv = model(xb)
-                            var = torch.exp(logv).clamp_min(1e-6)
-                            vloss.append(criterion(mu, yb, var).item())
-                        else:
-                            pred = model(xb)
-                            vloss.append(criterion(pred, yb).item())
+                for xb, yb in val_loader:
+                    xb, yb = xb.to(device), yb.to(device)
+                    if use_hetero:
+                        mu, logv = model(xb)
+                        var = torch.exp(logv).clamp_min(1e-6)
+                        vloss.append(criterion(mu, yb, var).item())
+                    else:
+                        vloss.append(criterion(model(xb), yb).item())
 
-            # ---- compute & log epoch metrics, step LR, track best ----
+            # ---- epoch metrics ----
             mtrain = float(np.mean(batch_losses)) if batch_losses else float("nan")
             mval   = float(np.mean(vloss))        if vloss        else float("nan")
             epoch_train_losses.append(mtrain)
@@ -180,6 +170,7 @@ def train_one_split(train_df, val_df, device):
             writer.add_scalar("loss/val",   mval,   epoch)
             print(f" epoch {epoch:03d} | train {mtrain:.4f} | val {mval:.4f}")
 
+            # ---- LR step + early stopping ----
             sch.step()
 
             if mval < best_val:
@@ -198,6 +189,7 @@ def train_one_split(train_df, val_df, device):
         writer.close()
 
     return {"val": best_val, "state": best_state}
+
 
 
 def main():
