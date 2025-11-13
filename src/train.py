@@ -59,7 +59,7 @@ def train_one_split(train_df, val_df, device):
     if n_train == 0 or n_val == 0:
         raise RuntimeError("No windows in train/val. Adjust window/shift/CSV length.")
 
-    # Model
+    # ----- model -----
     feats = resolved_feature_cols(cfg)
     targs = resolved_target_cols(cfg)
 
@@ -85,17 +85,20 @@ def train_one_split(train_df, val_df, device):
     else:
         raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
 
+    # heteroscedastic flag (used in train + val loops)
+    use_hetero = bool(getattr(cfg, "use_heteroscedastic", False) and
+                      cfg.model_type.lower() == "tcn")
 
     run_name = f"{cfg.model_type}_hz{cfg.target_hz}_win{cfg.window_s}"
     writer: SummaryWriter = make_writer(logdir="runs", run_name=run_name)
 
     opt = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sch = CosineAnnealingLR(opt, T_max=cfg.max_epochs)
-    if getattr(cfg, "use_heteroscedastic", False) and cfg.model_type.lower() == "tcn":
+
+    if use_hetero:
         criterion = GaussianNLLLoss(full=True)   # expects (mu, var)
     else:
         criterion = HuberLoss(cfg.huber_delta) if cfg.use_huber else mae
-
 
     best_val = float("inf")
     best_state = None
@@ -103,7 +106,6 @@ def train_one_split(train_df, val_df, device):
     patience = getattr(cfg, "early_stopping_patience", 10)
     no_improve = 0
 
-    
     epoch_train_losses, epoch_val_losses, grad_norms = [], [], []
 
     use_amp = torch.cuda.is_available()
@@ -119,14 +121,31 @@ def train_one_split(train_df, val_df, device):
                 xb, yb = xb.to(device), yb.to(device)
                 opt.zero_grad(set_to_none=True)
 
-                if use_hetero and cfg.model_type.lower() == "tcn":
-                    mu, logv = model(xb)
-                    var = torch.exp(logv).clamp_min(1e-6)
-                    loss = criterion(mu, yb, var)
+                if use_amp:
+                    with torch.amp.autocast("cuda"):
+                        if use_hetero:
+                            mu, logv = model(xb)
+                            var = torch.exp(logv).clamp_min(1e-6)
+                            loss = criterion(mu, yb, var)
+                        else:
+                            pred = model(xb)
+                            loss = criterion(pred, yb)
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(opt)
+                    scaler.update()
                 else:
-                    pred = model(xb)
-                    loss = criterion(pred, yb)
-
+                    if use_hetero:
+                        mu, logv = model(xb)
+                        var = torch.exp(logv).clamp_min(1e-6)
+                        loss = criterion(mu, yb, var)
+                    else:
+                        pred = model(xb)
+                        loss = criterion(pred, yb)
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    opt.step()
 
                 if global_step % 50 == 0:
                     log_gradients_tb(writer, model, step=global_step)
@@ -148,11 +167,23 @@ def train_one_split(train_df, val_df, device):
                     with torch.amp.autocast("cuda"):
                         for xb, yb in val_loader:
                             xb, yb = xb.to(device), yb.to(device)
-                            vloss.append(criterion(model(xb), yb).item())
+                            if use_hetero:
+                                mu, logv = model(xb)
+                                var = torch.exp(logv).clamp_min(1e-6)
+                                vloss.append(criterion(mu, yb, var).item())
+                            else:
+                                pred = model(xb)
+                                vloss.append(criterion(pred, yb).item())
                 else:
                     for xb, yb in val_loader:
                         xb, yb = xb.to(device), yb.to(device)
-                        vloss.append(criterion(model(xb), yb).item())
+                        if use_hetero:
+                            mu, logv = model(xb)
+                            var = torch.exp(logv).clamp_min(1e-6)
+                            vloss.append(criterion(mu, yb, var).item())
+                        else:
+                            pred = model(xb)
+                            vloss.append(criterion(pred, yb).item())
 
             # ---- compute & log epoch metrics, step LR, track best ----
             mtrain = float(np.mean(batch_losses)) if batch_losses else float("nan")
@@ -160,16 +191,13 @@ def train_one_split(train_df, val_df, device):
             epoch_train_losses.append(mtrain)
             epoch_val_losses.append(mval)
             grad_norms.append(float(np.mean(batch_grad_norms)) if batch_grad_norms else float("nan"))
-            use_hetero = getattr(cfg, "use_heteroscedastic", False)
 
             writer.add_scalar("loss/train", mtrain, epoch)
             writer.add_scalar("loss/val",   mval,   epoch)
             print(f" epoch {epoch:03d} | train {mtrain:.4f} | val {mval:.4f}")
 
-                        # step LR
             sch.step()
 
-            # track best + early stopping
             if mval < best_val:
                 best_val = mval
                 best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
@@ -180,14 +208,13 @@ def train_one_split(train_df, val_df, device):
                     print(f"[early stop] no val improvement for {patience} epochs; stopping at epoch {epoch}.")
                     break
 
-
-
     finally:
         plot_training_curves(epoch_train_losses, epoch_val_losses, "figures/training_curves.png")
         plot_grad_norms(grad_norms, "figures/grad_norms.png")
         writer.close()
 
     return {"val": best_val, "state": best_state}
+
 
 def main():
     set_seed(cfg.seed)
