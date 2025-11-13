@@ -1,6 +1,5 @@
 # src/train.py
 import os
-from torch.nn import GaussianNLLLoss
 import numpy as np
 import pandas as pd
 import torch
@@ -85,21 +84,14 @@ def train_one_split(train_df, val_df, device):
     else:
         raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
 
-    # heteroscedastic flag (used in train + val loops)
-    use_hetero = bool(getattr(cfg, "use_heteroscedastic", False) and
-                      cfg.model_type.lower() == "tcn")
+    
 
     run_name = f"{cfg.model_type}_hz{cfg.target_hz}_win{cfg.window_s}"
     writer: SummaryWriter = make_writer(logdir="runs", run_name=run_name)
-
     opt = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sch = CosineAnnealingLR(opt, T_max=cfg.max_epochs)
-
-    if use_hetero:
-        criterion = GaussianNLLLoss(full=True)   # expects (mu, var)
-    else:
-        criterion = HuberLoss(cfg.huber_delta) if cfg.use_huber else mae
-
+    criterion = HuberLoss(cfg.huber_delta) if cfg.use_huber else mae
+   
     best_val = float("inf")
     best_state = None
     global_step = 0
@@ -135,14 +127,6 @@ def train_one_split(train_df, val_df, device):
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     scaler.step(opt)
                     scaler.update()
-                else:
-                    if use_hetero:
-                        mu, logv = model(xb)
-                        var = torch.exp(logv).clamp_min(1e-6)
-                        loss = criterion(mu, yb, var)
-                    else:
-                        pred = model(xb)
-                        loss = criterion(pred, yb)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                     opt.step()

@@ -45,7 +45,7 @@ class Config:
     weight_decay: float = 1e-5
 
     # Optional: heteroscedastic head (predict mean & variance)
-    use_heteroscedastic: bool = True
+    use_heteroscedastic: bool = False
 
 
     # loss / weights
