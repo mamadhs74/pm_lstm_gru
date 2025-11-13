@@ -1,5 +1,6 @@
 # src/train.py
 import os
+from torch.nn import GaussianNLLLoss
 import numpy as np
 import pandas as pd
 import torch
@@ -90,7 +91,11 @@ def train_one_split(train_df, val_df, device):
 
     opt = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     sch = CosineAnnealingLR(opt, T_max=cfg.max_epochs)
-    criterion = HuberLoss(cfg.huber_delta) if cfg.use_huber else mae
+    if getattr(cfg, "use_heteroscedastic", False) and cfg.model_type.lower() == "tcn":
+        criterion = GaussianNLLLoss(full=True)   # expects (mu, var)
+    else:
+        criterion = HuberLoss(cfg.huber_delta) if cfg.use_huber else mae
+
 
     best_val = float("inf")
     best_state = None
@@ -114,21 +119,14 @@ def train_one_split(train_df, val_df, device):
                 xb, yb = xb.to(device), yb.to(device)
                 opt.zero_grad(set_to_none=True)
 
-                if use_amp:
-                    with torch.amp.autocast("cuda"):
-                        pred = model(xb)
-                        loss = criterion(pred, yb)
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(opt)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    scaler.step(opt)
-                    scaler.update()
+                if use_hetero and cfg.model_type.lower() == "tcn":
+                    mu, logv = model(xb)
+                    var = torch.exp(logv).clamp_min(1e-6)
+                    loss = criterion(mu, yb, var)
                 else:
                     pred = model(xb)
                     loss = criterion(pred, yb)
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                    opt.step()
+
 
                 if global_step % 50 == 0:
                     log_gradients_tb(writer, model, step=global_step)
@@ -162,6 +160,7 @@ def train_one_split(train_df, val_df, device):
             epoch_train_losses.append(mtrain)
             epoch_val_losses.append(mval)
             grad_norms.append(float(np.mean(batch_grad_norms)) if batch_grad_norms else float("nan"))
+            use_hetero = getattr(cfg, "use_heteroscedastic", False)
 
             writer.add_scalar("loss/train", mtrain, epoch)
             writer.add_scalar("loss/val",   mval,   epoch)

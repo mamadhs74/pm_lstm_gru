@@ -57,6 +57,16 @@ def binned_mae(y_true, y_pred, by, nbins, out_png):
 # ----------------------------------------
 # 2) Residual autocorrelation (simple ACF)
 # ----------------------------------------
+import numpy as np
+from statsmodels.stats.diagnostic import acorr_ljungbox
+
+def ljung_box_p(residuals: np.ndarray, lags: int = 40) -> float:
+    # returns p-value at the max lag
+    r = residuals.astype(float)
+    r = r - np.nanmean(r)
+    lb = acorr_ljungbox(r, lags=[lags], return_df=True)  # needs statsmodels
+    return float(lb["lb_pvalue"].iloc[0])
+
 def residual_autocorr(residuals, out_png, max_lag=200):
     """
     Plot the sample autocorrelation of residuals up to max_lag.

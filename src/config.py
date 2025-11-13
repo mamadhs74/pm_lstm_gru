@@ -12,9 +12,14 @@ class Config:
     # ---- sampling & windowing ----
     orig_hz: int = 10
     target_hz: int = 5
-    window_s: int = 40           # 200 steps @5 Hz
-    target_shift_s: int = 20     # predict t+20 s
+    window_s: int = 90           # 200 steps @5 Hz
+    target_shift_s: int = 15     # predict t+20 s
     stride_steps: int = 10        # 1 s stride @5 Hz
+
+        # ---- CV / splitting ----
+    n_folds: int = 5
+    purge_seconds: int = 60
+    use_timeseries_cv: bool = True
 
     # ---- feature/target columns (clean CSV names) ----
     feature_cols = [
@@ -24,26 +29,24 @@ class Config:
     ]
     target_cols = ["PM10_ug_per_m3","PM2_5_ug_per_m3","PM1_ug_per_m3"]
 
-        # ---- model ----
-    model_type: str = "tcn"  # "lstm", "gru", or "tcn"
-    hidden_size: int = 128       # used by RNN
-    num_layers: int = 2          # used by RNN
-    dropout: float = 0.4
-    conv_frontend: bool = True   # used by RNN
-    conv_channels: int = 64      # used by RNN
+     # ---- model ----
+    model_type: str = "tcn"              # "lstm", "gru", or "tcn"
+    dropout: float = 0.30
 
     # ---- TCN-specific ----
-    tcn_channels = (64,64,64,64,64,64)  # per residual block (dilations 1,2,4,…)
+    tcn_channels = (64, 64, 64, 64, 64, 64)   # deeper stack for ~40–90 s receptive field
     tcn_kernel_size: int = 3
 
-
     # ---- training ----
-    # training
     batch_size: int = 256
-    max_epochs: int = 80            
-    early_stopping_patience: int = 10
-    lr: float = 5e-4  
-    weight_decay: float = 1e-4  
+    max_epochs: int = 120
+    early_stopping_patience: int = 12
+    lr: float = 2e-4
+    weight_decay: float = 1e-5
+
+    # Optional: heteroscedastic head (predict mean & variance)
+    use_heteroscedastic: bool = True
+
 
     # loss / weights
     use_huber: bool = True
@@ -126,3 +129,8 @@ def resolved_target_cols(cfg: Config):
         return [f"{c}_resid_shift" for c in cfg.target_cols]
 
 cfg = Config()
+def resolved_feature_cols(cfg: Config):
+    base = cfg.feature_cols + ["idle", "brake_event", "dv", "jerk"]
+    # NEW physics/data features
+    return base + ["brake_bar_rate", "acc_long_ema", "load_transfer_proxy"]
+

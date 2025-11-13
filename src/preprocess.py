@@ -6,6 +6,10 @@ from typing import Dict
 from .config import cfg
 from .physics import fit_pf_per_target, apply_physics_baseline
 
+def _ema(series: pd.Series, half_life_s: float, hz: int) -> pd.Series:
+    alpha = 1.0 - np.exp(-np.log(2)/ (half_life_s * hz))
+    return series.ewm(alpha=alpha, adjust=False).mean()
+
 def canonicalize_units_and_names(df: pd.DataFrame, cfg) -> pd.DataFrame:
     """
     Map your raw CSV's German column names to the canonical names your pipeline expects,
@@ -66,13 +70,28 @@ def downsample(df: pd.DataFrame, orig_hz: int, target_hz: int) -> pd.DataFrame:
 def add_regime_features(df: pd.DataFrame) -> pd.DataFrame:
     v   = df.get("speed_kmh", pd.Series(0, index=df.index)).fillna(0).astype(float)
     b   = df.get("brake_bar", pd.Series(0, index=df.index)).fillna(0).astype(float)
-    acc = df.get("acc_long_ms2", pd.Series(0, index=df.index)).fillna(0).astype(float)
+    ax  = df.get("acc_long_ms2", pd.Series(0, index=df.index)).fillna(0).astype(float)
+
     out = df.copy()
     out["idle"]        = (v < 0.5).astype(int)
     out["brake_event"] = (b > 0.1).astype(int)
     out["dv"]          = v.diff().fillna(0)
-    out["jerk"]        = acc.diff().fillna(0)
+    out["jerk"]        = ax.diff().fillna(0)
+
+    # NEW: brake pressure rate (per second; your sampling becomes target_hz later)
+    out["brake_bar_rate"] = b.diff().fillna(0) * cfg.orig_hz
+
+    # NEW: short EMA of longitudinal acceleration to stabilize impulses (half-life ~0.6 s)
+    out["acc_long_ema"] = _ema(ax, half_life_s=0.6, hz=cfg.orig_hz)
+
+    # NEW: longitudinal load-transfer proxy ΔFz_front ≈ m * ax * h_CG / L (scaled)
+    m   = float(cfg.vehicle_mass_kg)
+    Lwb = float(cfg.wheelbase_m)
+    hcg = float(getattr(cfg, "cg_height_m", 0.62))
+    out["load_transfer_proxy"] = (m * ax * hcg / max(Lwb, 1e-6)) / max(m * 9.81, 1e-6)  # scale by weight
+
     return out
+
 
 def leak_free_split(df: pd.DataFrame, cfg) -> Dict[str, pd.DataFrame]:
     n = len(df); t0 = int(0.6 * n); t1 = int(0.8 * n)
