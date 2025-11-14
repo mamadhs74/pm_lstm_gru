@@ -23,24 +23,25 @@ from .physics import fit_pf_per_target, apply_physics_baseline
 # Helpers: model + predictions (official PyTorch eval loop pattern)
 # ---------------------------
 
-def _build_model(device, out_dim: int):
-    mt = cfg.model_type.lower()
-    feats = resolved_feature_cols(cfg)
-
-    if mt in ("lstm", "gru"):
+def _build_model(device, out_dim: int, input_size: int):
+    """
+    Build the SAME model type as in training, with the SAME input_size and out_dim,
+    and load the best checkpoint from .runs/.
+    """
+    if cfg.model_type.lower() in ("lstm", "gru"):
         model = RNNRegressor(
-            input_size=len(feats),
+            input_size=input_size,
             hidden_size=cfg.hidden_size,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
-            rnn_type=cfg.model_type,          # "lstm" or "gru"
+            rnn_type=cfg.model_type,
             conv_frontend=cfg.conv_frontend,
             conv_channels=cfg.conv_channels,
             out_dim=out_dim,
         ).to(device)
-    elif mt == "tcn":
+    elif cfg.model_type.lower() == "tcn":
         model = TCNRegressor(
-            input_size=len(feats),
+            input_size=input_size,
             out_dim=out_dim,
             channels_list=getattr(cfg, "tcn_channels", (64, 64, 64)),
             kernel_size=getattr(cfg, "tcn_kernel_size", 3),
@@ -49,37 +50,75 @@ def _build_model(device, out_dim: int):
     else:
         raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
 
-    ckpt = f".runs/{cfg.model_type}_best.pt"   # e.g. .runs/tcn_best.pt
+    ckpt = f".runs/{cfg.model_type}_best.pt"
     state = torch.load(ckpt, map_location=device)
     model.load_state_dict(state)
     model.eval()
     return model
 
+
+@torch.no_grad()
 @torch.no_grad()
 def _predict_loader(model, loader, device):
+    """
+    Run model on a loader and return (y_true, y_pred) in residual space.
+
+    Supports:
+      - deterministic models: model(x) -> y_pred
+      - heteroscedastic TCN:  model(x) -> (mu, log_var)
+    """
+    model.eval()
     ys_true, ys_pred = [], []
+
     for xb, yb in loader:
         xb, yb = xb.to(device), yb.to(device)
-        yp = model(xb)
+        out = model(xb)
+
+        # If TCN returns (mu, logv), take mu
+        if isinstance(out, (tuple, list)) and len(out) == 2:
+            yp = out[0]
+        else:
+            yp = out
+
         ys_true.append(yb.cpu().numpy())
         ys_pred.append(yp.cpu().numpy())
+
     if not ys_true:
-        return np.zeros((0,)), np.zeros((0,))
+        return None, None
+
     ytrue = np.vstack(ys_true)
     ypred = np.vstack(ys_pred)
     return ytrue, ypred
 
+
 def _make_val_loader(splits):
     from torch.utils.data import DataLoader
+
     window = int(cfg.window_s * cfg.target_hz)
     stride = cfg.stride_steps
-    feat_cols = cfg.feature_cols + ["idle", "brake_event", "dv", "jerk"]
+
+    # Use exactly the same feature/target sets as in train.py
+    feat_cols = resolved_feature_cols(cfg)      # cfg.feature_cols + ["idle","brake_event","dv","jerk"]
+    targ_cols = resolved_target_cols(cfg)       # residual target cols
+
     val_ds = WindowedDataset(
-        splits["val"], feat_cols, cfg.target_cols, window, stride, regime_weights=None
+        splits["val"],
+        feat_cols,
+        targ_cols,
+        window,
+        stride,
     )
-    loader = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
-                        drop_last=False, num_workers=2, pin_memory=torch.cuda.is_available())
+
+    loader = DataLoader(
+        val_ds,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+    )
     return loader
+
 
 def _align_arrays(*arrs):
     """Align arrays by shortest first dimension (simple, robust)."""
@@ -274,35 +313,47 @@ def plot_strategy_map(splits, ypred_resid, pf, fname="figures/fig6_strategy_map_
 def main():
     Path("figures").mkdir(parents=True, exist_ok=True)
 
-    # 1) Load & preprocess exactly as in training (official: reuse pipeline)
-    df = pd.read_csv(cfg.data_path)
+    # 1) Load & preprocess exactly as in training
+    df = pd.read_csv(cfg.data_path).dropna(subset=cfg.target_cols)
     splits = prepare_frames(df)
 
-    # 2) Fit physics PF on TRAIN only (Feißel principle)
+    # 2) Fit physics PF on TRAIN only (Feißel-style baseline)
     pf = fit_pf_per_target(splits["train"], cfg)  # keys: "PM10", "PM2_5", "PM1"
 
-    # 3) Build model & predict residuals on VAL (official eval loop)
+    # 3) Build model & validation loader (must mirror train.py)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    out_dim = len(cfg.target_cols) if not getattr(cfg, "use_physics_baseline", False) else len(cfg.target_cols)
-    model = _build_model(device, out_dim=out_dim)
+
+    # same feature/target sets as training
+    feat_cols = resolved_feature_cols(cfg)
+    targ_cols = resolved_target_cols(cfg)
+
+    out_dim = len(targ_cols)
+    model = _build_model(
+        device=device,
+        out_dim=out_dim,
+        input_size=len(feat_cols),
+    )
+
     val_loader = _make_val_loader(splits)
     ytrue_resid, ypred_resid = _predict_loader(model, val_loader, device)
+    if ytrue_resid is None:
+        print("[report] no validation windows; nothing to plot.")
+        return
 
     # ---- FIGURE 1
     plot_pipeline_diagram("figures/fig1_pipeline.png")
 
-    # ---- FIGURE 2 & 3 already produced by your training script:
-    # figures/training_curves.png, figures/grad_norms.png
-    # (These match the official TensorBoard/plotting patterns.)
-
     # ---- FIGURE 4
-    plot_val_overlay_from_loader(model, val_loader, cfg.target_cols, "figures/fig4_overlay_val_residuals.png")
+    plot_val_overlay_from_loader(model, val_loader, cfg.target_cols,
+                                 "figures/fig4_overlay_val_residuals.png")
 
     # ---- FIGURE 5
-    plot_physics_vs_hybrid(splits, ytrue_resid, ypred_resid, pf, "figures/fig5_physics_vs_hybrid_pm10.png")
+    plot_physics_vs_hybrid(splits, ytrue_resid, ypred_resid, pf,
+                           "figures/fig5_physics_vs_hybrid_pm10.png")
 
     # ---- FIGURE 6
-    plot_strategy_map(splits, ypred_resid, pf, "figures/fig6_strategy_map_pm10.png")
+    plot_strategy_map(splits, ypred_resid, pf,
+                      "figures/fig6_strategy_map_pm10.png")
 
     print("[report] all plots generated. See 'figures/'.")
 
