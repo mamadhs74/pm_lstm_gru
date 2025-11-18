@@ -60,12 +60,43 @@ def run_scenario(excel_path, row_start, row_end,
     # 1) set physics flag in config to match THIS checkpoint
     cfg.use_physics_baseline = use_physics
 
-    # 2) read and cut the scenario
-    raw = pd.read_excel(excel_path)
+        # 2) read and cut the scenario
+    raw = pd.read_excel(excel_path, sheet_name="T6_CAN")
     raw = raw.iloc[row_start:row_end].reset_index(drop=True)
+    print(f"[{scenario_name}/{tag}] RAW columns:", list(raw.columns))
+
+    # --- rename raw columns to canonical names used in training ---
+    rename_map = {
+        # vehicle dynamics
+        "KO1_[km\\h]": "speed_kmh",
+        "Velocity_[km\\h]": "speed_kmh",
+        "BR8_Laengsbeschl_[m\\s2]": "acc_long_ms2",
+        "BR5_Bremsdruck_[bar]": "brake_bar",
+        "BR5_Giergeschw_[Grad\\s]": "yaw_deg_s",
+        "BR2_Querbeschl_[g]": "acc_lat_ms2",
+        "LW1_Lenk_Gesch_[Grad\\s]": "steer_rate_deg_s",
+
+        # engine / environment
+        "MO1_Drehzahl_[1\\min]": "rpm",
+        "KO2_Aussen_T_[Grad_Celsius]": "ambient_temp_c",
+
+        # wheel speeds
+        "BR3_Rad_VL_[km\\h]": "wheel_fl_kmh",
+        "BR3_Rad_VR_[km\\h]": "wheel_fr_kmh",
+        "BR3_Rad_HL_[km\\h]": "wheel_rl_kmh",
+        "BR3_Rad_HR_[km\\h]": "wheel_rr_kmh",
+
+        # geometry for physics
+        "Distance_[m]": "distance_m",
+        "Altitude_WGS_84_[m]": "altitude_m",
+    }
+    raw = raw.rename(columns=rename_map)
+    print(f"[{scenario_name}/{tag}] AFTER RENAME:", list(raw.columns))
 
     # 3) full preprocessing (same as training/eval)
-    splits = prepare_frames(raw)  # builds *_phys and *_resid_phys when use_physics=True
+    splits = prepare_frames(raw)
+    print(f"[{scenario_name}/{tag}] TRAIN columns:", list(splits["train"].columns))
+
 
     # we use ONLY the test split (last 20 %) for prediction,
     # but since this file is just one scenario, test ~ scenario tail

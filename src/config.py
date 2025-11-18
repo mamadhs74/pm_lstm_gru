@@ -111,7 +111,7 @@ class Config:
     # ===== physics-baseline options =====
     physics_ma_window: int = 5
     grade_smooth_window: int = 9
-    use_physics_baseline: bool = True  # train on (PM - PF * W_spec)
+    use_physics_baseline: bool = False  # train on (PM - PF * W_spec)
 
     # (optional) dynamic front share using simple longitudinal weight transfer
     use_dynamic_brake_share: bool = True   # set True to enable
