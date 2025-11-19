@@ -1,44 +1,55 @@
 # src/infer_scenario.py
-
+import numpy as np
 import pandas as pd
 import torch
 import pickle
 from pathlib import Path
-import numpy as np     
-from torch.utils.data import Dataset   
+from torch.utils.data import Dataset
+
 from src.config import cfg, resolved_feature_cols, resolved_target_cols
-from src.datasets import WindowedDataset
-from src.models import TCNRegressor, RNNRegressor
+from src.preprocess import canonicalize_units_and_names, engineer_features
 from src.visualize import plot_overlay
-from src.preprocess import make_features_for_scenario
+from src.models import TCNRegressor, RNNRegressor
+
+
+# ---------- Small dataset for inference ----------
 
 class InferenceWindowedDataset(Dataset):
     """
-    Like WindowedDataset, but X-only (no targets).
-    Used for out-of-sample inference on Booster/Stopper.
+    Only features, no targets. Each item = one window used for one prediction.
     """
     def __init__(self, df, feature_cols, window, stride):
         self.feature_cols = feature_cols
-        self.window = window
-        self.stride = stride
-
         X = df[feature_cols].values.astype(np.float32)
-        n = len(df)
 
-        self.X_windows = []
-        i = 0
-        while i + window <= n:
-            self.X_windows.append(X[i:i+window])
-            i += stride
+        self.window = int(window)
+        self.stride = int(stride)
+        max_start = len(X) - self.window
+
+        if max_start < 0:
+            # not enough samples for even one window
+            self.indices = []
+            self.X = np.empty((0, self.window, len(feature_cols)), dtype=np.float32)
+            return
+
+        self.indices = list(range(0, max_start + 1, self.stride))
+
+        # Pre-store X so __getitem__ is simple
+        self.X = X
 
     def __len__(self):
-        return len(self.X_windows)
+        return len(self.indices)
 
     def __getitem__(self, idx):
-        return torch.from_numpy(self.X_windows[idx])
+        i = self.indices[idx]
+        x = self.X[i : i + self.window]  # (T, F)
+        return torch.from_numpy(x)       # (T, F)
+
+
+# ---------- Helpers ----------
 
 def load_scalers():
-    """Load feature & target scalers saved during training."""
+    """Load feature & target scalers saved during training on 1_clean.csv."""
     with open(".runs/feature_scaler.pkl", "rb") as f:
         f_scaler = pickle.load(f)
     with open(".runs/target_scaler.pkl", "rb") as f:
@@ -47,7 +58,10 @@ def load_scalers():
 
 
 def build_model(device, feat_cols):
-    """Rebuild the same architecture as in train.py for inference."""
+    """
+    Build the same model architecture as in train.py / scenario_eval.py.
+    We use positional args for TCNRegressor to avoid keyword name mismatch.
+    """
     targs = resolved_target_cols(cfg)
     mt = cfg.model_type.lower()
 
@@ -63,106 +77,111 @@ def build_model(device, feat_cols):
             out_dim=len(targs),
         )
     else:
+        # TCNRegressor(input_size, out_dim, channels_list, kernel_size, dropout)
+        # or TCNRegressor(num_inputs, out_dim, num_channels, kernel_size, dropout)
+        # -> positional args keep this robust.
         model = TCNRegressor(
-            input_size=len(feat_cols),
-            channels=list(cfg.tcn_channels),      
-            kernel_size=cfg.tcn_kernel_size,
-            dropout=cfg.dropout,
-            out_dim=len(targs),
+            len(feat_cols),
+            len(targs),
+            list(cfg.tcn_channels),
+            cfg.tcn_kernel_size,
+            cfg.dropout,
         )
 
     return model.to(device)
 
 
+def make_features_for_scenario(df_raw):
+    """
+    Apply the same unit canonicalisation + feature engineering as in training,
+    but WITHOUT splitting into train/val/test or refitting scalers.
+    """
+    df = canonicalize_units_and_names(df_raw, cfg)
+    df = engineer_features(df, cfg)  # adds idle, dv, jerk, etc., so that
+                                     # resolved_feature_cols(cfg) all exist
+    return df
 
-def predict_scenario(csv_path, ckpt_path, tag):
+
+def predict_scenario(csv_path: str, ckpt_path: str, tag: str):
     print(f"\n=== Scenario inference for {csv_path} ===")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- 1) Load raw scenario and build the SAME features as training ---
+    # --- 1) Load raw cleaned scenario ---
     df_raw = pd.read_csv(csv_path)
-    df_feat = make_features_for_scenario(df_raw, cfg)
 
-    # --- 2) Load scalers from training ---
-    f_scaler, t_scaler = load_scalers()
+    # --- 2) Build features exactly as for training ---
+    df_feat = make_features_for_scenario(df_raw)
 
-    # How many features was the scaler fitted on?
-    n_feat_trained = f_scaler.n_features_in_
+    feat_cols = resolved_feature_cols(cfg)
+    targ_cols = resolved_target_cols(cfg)
 
-    # Full configured feature list (may be longer)
-    feat_cols_full = resolved_feature_cols(cfg)
-
-    # Use ONLY the first n_feat_trained features (the ones used during training)
-    feat_cols = feat_cols_full[:n_feat_trained]
-
-    print("feat_cols used for inference:", feat_cols)
-    print("Scaler expects:", n_feat_trained, "features")
-    print("df_feat[feat_cols].shape:", df_feat[feat_cols].shape)
-
-    targ_cols = resolved_target_cols(cfg)  # just for naming/order, NOT taken from df
-
-    # --- 3) Apply feature scaling (NO refit!!) ---
-    df_scaled = df_feat.copy()
-    df_scaled[feat_cols] = f_scaler.transform(df_feat[feat_cols])
-
-        # --- 4) Build windows for inference (clamp window <= sequence length) ---
-    window_raw = int(cfg.window_s * cfg.target_hz)
-    seq_len = len(df_scaled)
-
-    # For short scenarios like Booster/Stopper, we cap window at seq_len
-    window = min(window_raw, seq_len)
-    stride = int(cfg.stride_steps)
-
-    print("window_raw:", window_raw, " -> using window:", window)
-
-    ds = InferenceWindowedDataset(df_scaled, feat_cols, window, stride)
-    if len(ds) == 0:
-        print("[WARN] No windows for", csv_path, "(this should not happen anymore)")
+    # Safety: check that all feature columns exist
+    missing_feats = [c for c in feat_cols if c not in df_feat.columns]
+    if missing_feats:
+        print("[ERROR] Some required feature columns are missing in scenario:")
+        print(missing_feats)
         return
 
+    # --- 3) Load scalers from training on 1_clean.csv ---
+    f_scaler, t_scaler = load_scalers()
 
-    # --- 5) Load trained model with matching input dimension ---
+    # --- 4) Scale features using *training* feature scaler (no refit!) ---
+    X_feat = df_feat.copy()
+    print("feat_cols used for inference:", feat_cols)
+    print("Scaler expects:", f_scaler.n_features_in_, "features")
+    print("df_feat[feat_cols].shape:", df_feat[feat_cols].shape)
+
+    X_feat[feat_cols] = f_scaler.transform(df_feat[feat_cols])
+
+    # --- 5) Choose window length: adapt if scenario is shorter than training window ---
+    window_raw = int(cfg.window_s * cfg.target_hz)  # e.g. 90 s * 5 Hz = 450
+    window = min(window_raw, len(X_feat))
+    if window < 5:
+        print(f"[WARN] Scenario too short (len={len(X_feat)}) for any window.")
+        return
+
+    print(f"window_raw: {window_raw}  -> using window: {window}")
+
+    stride = int(cfg.stride_steps)
+    ds = InferenceWindowedDataset(X_feat, feat_cols, window, stride)
+    if len(ds) == 0:
+        print(f"[WARN] No windows for {csv_path}")
+        return
+
+    # --- 6) Build and load trained model (trained on 1_clean.csv via train.py) ---
     model = build_model(device, feat_cols)
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model.eval()
 
-    # --- 6) Run inference ---
-    preds = []
+    # --- 7) Run inference: one PM vector per window (sequence-to-one) ---
+    preds_scaled = []
     with torch.no_grad():
         for xb in ds:
-            xb = xb.to(device)
-            out = model(xb.unsqueeze(0)).cpu().numpy().squeeze()
-            preds.append(out)
+            xb = xb.unsqueeze(0).to(device)   # (1, T, F)
+            yb = model(xb)                    # (1, out_dim) last time step
+            preds_scaled.append(yb.cpu().numpy().squeeze())
 
-    preds = np.asarray(preds)  # shape: (n_windows, n_targets)
+    preds_scaled = np.stack(preds_scaled, axis=0)  # (num_windows, out_dim)
 
-    # --- 7) Inverse-transform predictions ---
-    preds_scaled_df = pd.DataFrame(preds, columns=[t + "_scaled_pred" for t in targ_cols])
-    preds_unscaled = t_scaler.inverse_transform(preds_scaled_df.values)
-    preds_df = pd.DataFrame(preds_unscaled, columns=targ_cols)
+    # --- 8) Inverse-transform predictions back to physical PM (µg/m³ residuals) ---
+    preds_phys = t_scaler.inverse_transform(preds_scaled)  # same order as targ_cols
+    # Extract PM10 prediction
+    idx_pm10 = targ_cols.index("PM10_ug_per_m3")
+    pm10_pred = preds_phys[:, idx_pm10]
 
-    # pick the PM10 target (whatever its exact name)
-    pm10_col = [c for c in targ_cols if "PM10" in c][0]
-
-    # --- 8) Align predictions with true PM10 ---
-    # time index for windows: prediction at the END of each window (training-like)
-    start_idx = window - 1
-    true_pm = df_feat["PM10_ug_per_m3"].iloc[start_idx:start_idx + len(preds_df)].reset_index(drop=True)
-    pred_pm = preds_df[pm10_col].reset_index(drop=True)
+    # --- 9) Align predictions with timeline (each window -> last index in that window) ---
+    idx_end = np.array(ds.indices) + window - 1
+    pm10_true = df_feat["PM10_ug_per_m3"].values[idx_end]
 
     df_plot = pd.DataFrame({
-        "PM10_true": true_pm,
-        "PM10_pred": pred_pm,
+        "PM10_true": pm10_true,
+        "PM10_pred": pm10_pred,
     })
 
-    # --- 9) Plot ---
     out_path = f"figures/{Path(csv_path).stem}_{tag}_pm10_overlay.png"
-    plot_overlay(
-        df_plot,
-        out_path,
-        title=f"{Path(csv_path).stem} – PM10 true vs predicted ({tag})",
-    )
+    plot_overlay(df_plot, out_path,
+                 title=f"{Path(csv_path).stem} – PM10 true vs predicted ({tag})")
 
     print("Saved:", out_path)
 
@@ -171,12 +190,14 @@ if __name__ == "__main__":
     booster = "data/processed/booster_clean.csv"
     stopper = "data/processed/stopper_clean.csv"
 
-    ckpt_plain = ".runs/tcn_best.pt"       # or .runs/tcn_plain_best.pt if you renamed
+    # model trained with train.py on data/processed/1_clean.csv
+    ckpt_plain = ".runs/tcn_best.pt"      # or tcn_plain_best.pt if you renamed it
+    # option: a physics model if you trained it
     # ckpt_phys  = ".runs/tcn_phys_best.pt"
 
     predict_scenario(booster, ckpt_plain, "plain")
     predict_scenario(stopper, ckpt_plain, "plain")
 
-    # if you later have a phys model:
+    # If you later train a physics-aware model, you can also call:
     # predict_scenario(booster, ckpt_phys, "phys")
     # predict_scenario(stopper, ckpt_phys, "phys")
