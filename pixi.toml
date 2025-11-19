@@ -16,6 +16,9 @@ report_more = "python -m src.report_more"
 evaluate    = "python -m src.evaluate"
 scenarios = "python -m src.scenarios"
 report_advanced = "python -m src.report_advanced_plots"
+scenario_eval = "python -m src.scenario_eval"
+predict_booster_stopper = "python -m src.predict_booster_stopper"
+infer_scenario = "python -m src.infer_scenario"
 
 
 
@@ -33,3 +36,4 @@ tensorboard = "*"
 captum = "*"
 pyarrow = ">=21.0.0,<22"
 statsmodels = ">=0.14.5,<0.15"
+openpyxl = ">=3.1.5,<4"

@@ -5,6 +5,8 @@ from sklearn.preprocessing import RobustScaler, StandardScaler
 from typing import Dict
 from .config import cfg
 from .physics import fit_pf_per_target, apply_physics_baseline
+from pathlib import Path
+import pickle
 
 def _ema(series: pd.Series, half_life_s: float, hz: int) -> pd.Series:
     alpha = 1.0 - np.exp(-np.log(2)/ (half_life_s * hz))
@@ -168,18 +170,30 @@ def prepare_frames(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         for k in ("train", "val", "test"):
             splits[k] = shift_phys_targets(splits[k], cfg)
 
-    # 6) === NEW: scale the final target columns actually fed to the model ===
+        # 6) === NEW: scale the final target columns actually fed to the model ===
     from .config import resolved_target_cols
-    targ_cols = resolved_target_cols(cfg)  # e.g., ["PM10_ug_per_m3_resid_shift", ...] or phys variant
+    targ_cols = resolved_target_cols(cfg)  # e.g. ["PM10_ug_per_m3_resid_shift", ...]
 
-    t_scaler = fit_target_scaler(splits["train"], targ_cols)     # fit on TRAIN only
+    t_scaler = fit_target_scaler(splits["train"], targ_cols)  # fit on TRAIN only
     for k in ("train", "val", "test"):
-        splits[k] = apply_target_scaler(splits[k], targ_cols, t_scaler)
+        if len(splits[k]) > 0:
+            splits[k] = apply_target_scaler(splits[k], targ_cols, t_scaler)
 
     # optionally stash for later (not required)
     splits["_target_scaler"] = t_scaler
 
+    # === NEW: save scalers for inference (feature + target) ===
+    runs_dir = Path(".runs")
+    runs_dir.mkdir(exist_ok=True)
+
+    with open(runs_dir / "feature_scaler.pkl", "wb") as f:
+        pickle.dump(scaler, f)
+
+    with open(runs_dir / "target_scaler.pkl", "wb") as f:
+        pickle.dump(t_scaler, f)
+
     return splits
+
 
 def fit_target_scaler(train_df: pd.DataFrame, target_cols):
     """Fit a scaler on TRAIN targets (residual target columns actually fed to the model)."""
