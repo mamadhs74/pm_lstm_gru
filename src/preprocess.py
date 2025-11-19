@@ -206,3 +206,8 @@ def apply_target_scaler(df: pd.DataFrame, target_cols, sc: StandardScaler):
     out = df.copy()
     out.loc[:, target_cols] = sc.transform(out[target_cols].values)
     return out
+def make_features_for_scenario(df: pd.DataFrame, cfg) -> pd.DataFrame:
+    df = canonicalize_units_and_names(df, cfg)
+    df = downsample(df, cfg.orig_hz, cfg.target_hz)
+    df = add_regime_features(df)
+    return df

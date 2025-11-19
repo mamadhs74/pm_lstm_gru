@@ -9,6 +9,7 @@ from src.config import cfg, resolved_feature_cols, resolved_target_cols
 from src.datasets import WindowedDataset
 from src.models import TCNRegressor, RNNRegressor
 from src.visualize import plot_overlay
+from src.preprocess import make_features_for_scenario
 
 
 def load_scalers():
@@ -53,8 +54,10 @@ def predict_scenario(csv_path, ckpt_path, tag):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # --- 1) Load data ---
-    df = pd.read_csv(csv_path)
+    # --- 1) Load raw scenario and build the SAME features as training ---
+    df_raw = pd.read_csv(csv_path)
+    df_feat = make_features_for_scenario(df_raw, cfg)
+
     feat_cols = resolved_feature_cols(cfg)
     targ_cols = resolved_target_cols(cfg)
 
@@ -62,14 +65,17 @@ def predict_scenario(csv_path, ckpt_path, tag):
     f_scaler, t_scaler = load_scalers()
 
     # --- 3) Apply feature scaling (NO refit!!) ---
-    df_scaled = df.copy()
-    df_scaled[feat_cols] = f_scaler.transform(df[feat_cols])
+    df_scaled = df_feat.copy()
+    df_scaled[feat_cols] = f_scaler.transform(df_feat[feat_cols])
 
-    # --- 4) Build windows exactly like training (official approach) ---
+    # --- 4) Build windows exactly like training ---
     window = int(cfg.window_s * cfg.target_hz)
     stride = int(cfg.stride_steps)
 
     ds = WindowedDataset(df_scaled, feat_cols, targ_cols, window, stride)
+    if len(ds) == 0:
+        print("[WARN] No windows for", csv_path)
+        return
 
     # --- 5) Load trained model ---
     model = build_model(device)
@@ -86,13 +92,18 @@ def predict_scenario(csv_path, ckpt_path, tag):
 
     preds = pd.DataFrame(preds, columns=[t + "_scaled_pred" for t in targ_cols])
 
-    # --- 7) Inverse-transform predictions ---
-    preds[targ_cols] = t_scaler.inverse_transform(preds[[t + "_scaled_pred" for t in targ_cols]])
+    # --- 7) Inverse-transform predictions (from scaled residual to µg/m³) ---
+    preds[targ_cols] = t_scaler.inverse_transform(
+        preds[[t + "_scaled_pred" for t in targ_cols]]
+    )
 
-    # --- 8) Trim DF for alignment ---
+    # for simplicity we assume one of targ_cols is "PM10_ug_per_m3" (or residual mapped back)
+    pm10_col = [c for c in targ_cols if "PM10" in c][0]
+
+    # --- 8) Align predictions with truth ---
     df_plot = pd.DataFrame({
-        "PM10_true": df["PM10_ug_per_m3"].iloc[window - 1:].reset_index(drop=True),
-        "PM10_pred": preds["PM10_ug_per_m3"].reset_index(drop=True),
+        "PM10_true": df_feat["PM10_ug_per_m3"].iloc[window - 1:].reset_index(drop=True),
+        "PM10_pred": preds[pm10_col].reset_index(drop=True),
     })
 
     # --- 9) Plot ---
@@ -107,12 +118,12 @@ if __name__ == "__main__":
     booster = "data/processed/booster_clean.csv"
     stopper = "data/processed/stopper_clean.csv"
 
-    ckpt_plain = ".runs/tcn_best.pt"     # or tcn_plain_best.pt
-    ckpt_phys  = ".runs/tcn_phys_best.pt"
+    ckpt_plain = ".runs/tcn_best.pt"       # or .runs/tcn_plain_best.pt if you renamed
+    # ckpt_phys  = ".runs/tcn_phys_best.pt"
 
     predict_scenario(booster, ckpt_plain, "plain")
     predict_scenario(stopper, ckpt_plain, "plain")
 
-    # If you have a physics model:
+    # if you later have a phys model:
     # predict_scenario(booster, ckpt_phys, "phys")
     # predict_scenario(stopper, ckpt_phys, "phys")
