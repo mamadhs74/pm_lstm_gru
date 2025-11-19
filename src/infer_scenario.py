@@ -11,6 +11,30 @@ from src.models import TCNRegressor, RNNRegressor
 from src.visualize import plot_overlay
 from src.preprocess import make_features_for_scenario
 
+class InferenceWindowedDataset(Dataset):
+    """
+    Like WindowedDataset, but X-only (no targets).
+    Used for out-of-sample inference on Booster/Stopper.
+    """
+    def __init__(self, df, feature_cols, window, stride):
+        self.feature_cols = feature_cols
+        self.window = window
+        self.stride = stride
+
+        X = df[feature_cols].values.astype(np.float32)
+        n = len(df)
+
+        self.X_windows = []
+        i = 0
+        while i + window <= n:
+            self.X_windows.append(X[i:i+window])
+            i += stride
+
+    def __len__(self):
+        return len(self.X_windows)
+
+    def __getitem__(self, idx):
+        return torch.from_numpy(self.X_windows[idx])
 
 def load_scalers():
     """Load feature & target scalers saved during training."""
@@ -74,17 +98,17 @@ def predict_scenario(csv_path, ckpt_path, tag):
     print("Scaler expects:", n_feat_trained, "features")
     print("df_feat[feat_cols].shape:", df_feat[feat_cols].shape)
 
-    targ_cols = resolved_target_cols(cfg)
+    targ_cols = resolved_target_cols(cfg)  # just for naming/order, NOT taken from df
 
     # --- 3) Apply feature scaling (NO refit!!) ---
     df_scaled = df_feat.copy()
     df_scaled[feat_cols] = f_scaler.transform(df_feat[feat_cols])
 
-    # --- 4) Build windows exactly like training ---
+    # --- 4) Build windows exactly like training, but X-only ---
     window = int(cfg.window_s * cfg.target_hz)
     stride = int(cfg.stride_steps)
 
-    ds = WindowedDataset(df_scaled, feat_cols, targ_cols, window, stride)
+    ds = InferenceWindowedDataset(df_scaled, feat_cols, window, stride)
     if len(ds) == 0:
         print("[WARN] No windows for", csv_path)
         return
@@ -97,25 +121,30 @@ def predict_scenario(csv_path, ckpt_path, tag):
     # --- 6) Run inference ---
     preds = []
     with torch.no_grad():
-        for xb, _ in ds:
+        for xb in ds:
             xb = xb.to(device)
             out = model(xb.unsqueeze(0)).cpu().numpy().squeeze()
             preds.append(out)
 
-    preds = pd.DataFrame(preds, columns=[t + "_scaled_pred" for t in targ_cols])
+    preds = np.asarray(preds)  # shape: (n_windows, n_targets)
 
     # --- 7) Inverse-transform predictions ---
-    preds[targ_cols] = t_scaler.inverse_transform(
-        preds[[t + "_scaled_pred" for t in targ_cols]]
-    )
+    preds_scaled_df = pd.DataFrame(preds, columns=[t + "_scaled_pred" for t in targ_cols])
+    preds_unscaled = t_scaler.inverse_transform(preds_scaled_df.values)
+    preds_df = pd.DataFrame(preds_unscaled, columns=targ_cols)
 
-    # pick the PM10 column from targets (e.g. "PM10_ug_per_m3" or residual-shifted)
+    # pick the PM10 target (whatever its exact name)
     pm10_col = [c for c in targ_cols if "PM10" in c][0]
 
-    # --- 8) Align predictions with truth ---
+    # --- 8) Align predictions with true PM10 ---
+    # time index for windows: prediction at the END of each window (training-like)
+    start_idx = window - 1
+    true_pm = df_feat["PM10_ug_per_m3"].iloc[start_idx:start_idx + len(preds_df)].reset_index(drop=True)
+    pred_pm = preds_df[pm10_col].reset_index(drop=True)
+
     df_plot = pd.DataFrame({
-        "PM10_true": df_feat["PM10_ug_per_m3"].iloc[window - 1:].reset_index(drop=True),
-        "PM10_pred": preds[pm10_col].reset_index(drop=True),
+        "PM10_true": true_pm,
+        "PM10_pred": pred_pm,
     })
 
     # --- 9) Plot ---
