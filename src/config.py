@@ -23,10 +23,21 @@ class Config:
 
     # ---- feature/target columns (clean CSV names) ----
     feature_cols = [
-        "speed_kmh","acc_long_ms2","brake_bar","yaw_deg_s",
-         "acc_lat_ms2","steer_rate_deg_s","rpm","ambient_temp_c",
-        "wheel_fl_kmh","wheel_fr_kmh","wheel_rl_kmh","wheel_rr_kmh",
+        "speed_kmh",
+        "acc_long_ms2",
+        "brake_bar",
+        "yaw_deg_s",
+        "acc_lat_ms2",
+        "steer_rate_deg_s",
+        "rpm",
+        "ambient_temp_c",
+        "wheel_fl_kmh",
+        "wheel_fr_kmh",
+        "wheel_rl_kmh",
+        "wheel_rr_kmh",
     ]
+
+
     target_cols = ["PM10_ug_per_m3","PM2_5_ug_per_m3","PM1_ug_per_m3"]
 
      # ---- model ----
@@ -120,7 +131,9 @@ class Config:
 
 
 def resolved_feature_cols(cfg: Config):
-    return cfg.feature_cols + ["idle", "brake_event", "dv", "jerk"]
+    # Training used ONLY the 12 base features.
+    return cfg.feature_cols
+
 
 def resolved_target_cols(cfg: Config):
     if getattr(cfg, "use_physics_baseline", False):
@@ -129,8 +142,3 @@ def resolved_target_cols(cfg: Config):
         return [f"{c}_resid_shift" for c in cfg.target_cols]
 
 cfg = Config()
-def resolved_feature_cols(cfg: Config):
-    base = cfg.feature_cols + ["idle", "brake_event", "dv", "jerk"]
-    # NEW physics/data features
-    return base + ["brake_bar_rate", "acc_long_ema", "load_transfer_proxy"]
-
