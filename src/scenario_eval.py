@@ -1,4 +1,4 @@
-# scenario_eval.py
+# src/scenario_eval.py
 import pandas as pd
 import torch
 from pathlib import Path
@@ -8,10 +8,6 @@ from src.preprocess import prepare_frames
 from src.datasets import WindowedDataset
 from src.models import TCNRegressor, RNNRegressor
 from src.visualize import plot_overlay
-
-
-def _base_name(col: str) -> str:
-    return col.split("_")[0]  # PM10_ug_per_m3 -> PM10
 
 
 def _build_model(device):
@@ -45,61 +41,22 @@ def _predict_df(model, ds, device, display_names, df_for_phys=None):
     return base_predict_df(model, ds, device, display_names, test_df_for_phys=df_for_phys)
 
 
-def run_scenario(excel_path, row_start, row_end,
+def run_scenario(csv_path, row_start, row_end,
                  ckpt_path, use_physics, scenario_name, tag):
-    """
-    excel_path : xlsx with raw Booster/Stopper data
-    row_start, row_end : 0-based slice (see below)
-    ckpt_path : path to trained model (with or without physics)
-    use_physics : True / False (must match how the model was trained!)
-    scenario_name : 'booster' or 'stopper'
-    tag : 'phys' or 'plain' for filenames
-    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1) set physics flag in config to match THIS checkpoint
     cfg.use_physics_baseline = use_physics
 
-        # 2) read and cut the scenario
-    raw = pd.read_excel(excel_path, sheet_name="T6_CAN")
+    # 1) load cleaned Booster/Stopper
+    raw = pd.read_csv(csv_path)
     raw = raw.iloc[row_start:row_end].reset_index(drop=True)
-    print(f"[{scenario_name}/{tag}] RAW columns:", list(raw.columns))
 
-    # --- rename raw columns to canonical names used in training ---
-    rename_map = {
-        # vehicle dynamics
-        "KO1_[km\\h]": "speed_kmh",
-        "Velocity_[km\\h]": "speed_kmh",
-        "BR8_Laengsbeschl_[m\\s2]": "acc_long_ms2",
-        "BR5_Bremsdruck_[bar]": "brake_bar",
-        "BR5_Giergeschw_[Grad\\s]": "yaw_deg_s",
-        "BR2_Querbeschl_[g]": "acc_lat_ms2",
-        "LW1_Lenk_Gesch_[Grad\\s]": "steer_rate_deg_s",
-
-        # engine / environment
-        "MO1_Drehzahl_[1\\min]": "rpm",
-        "KO2_Aussen_T_[Grad_Celsius]": "ambient_temp_c",
-
-        # wheel speeds
-        "BR3_Rad_VL_[km\\h]": "wheel_fl_kmh",
-        "BR3_Rad_VR_[km\\h]": "wheel_fr_kmh",
-        "BR3_Rad_HL_[km\\h]": "wheel_rl_kmh",
-        "BR3_Rad_HR_[km\\h]": "wheel_rr_kmh",
-
-        # geometry for physics
-        "Distance_[m]": "distance_m",
-        "Altitude_WGS_84_[m]": "altitude_m",
-    }
-    raw = raw.rename(columns=rename_map)
-    print(f"[{scenario_name}/{tag}] AFTER RENAME:", list(raw.columns))
-
-    # 3) full preprocessing (same as training/eval)
+    # 2) for short scenarios, turn off purge to keep train split non-empty
+    orig_purge = cfg.purge_seconds
+    cfg.purge_seconds = 0
     splits = prepare_frames(raw)
-    print(f"[{scenario_name}/{tag}] TRAIN columns:", list(splits["train"].columns))
+    cfg.purge_seconds = orig_purge
 
-
-    # we use ONLY the test split (last 20 %) for prediction,
-    # but since this file is just one scenario, test ~ scenario tail
     test_df = splits["test"].reset_index(drop=True)
 
     window = int(cfg.window_s * cfg.target_hz)
@@ -112,71 +69,55 @@ def run_scenario(excel_path, row_start, row_end,
         print(f"[{scenario_name}/{tag}] No windows.")
         return
 
-    # 4) build model and load checkpoint
+    # 3) build model & load pretrained checkpoint from 1_clean
     model = _build_model(device)
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model.eval()
 
-    display_names = cfg.target_cols  # ["PM10_ug_per_m3", "PM2_5_ug_per_m3", "PM1_ug_per_m3"]
-
+    display_names = ["PM10_ug_per_m3"]
     pred_df = _predict_df(model, ds, device, display_names, df_for_phys=test_df)
 
-    # 5) overlay plot in PHYSICAL space if physics available
-    #    (same logic as evaluate.py hybrid section)
     Path("figures").mkdir(exist_ok=True)
+    base = "PM10"
 
-    base = "PM10"   # you can loop over all 3 if you want
-    phys_col = f"{base}_phys"
-    if phys_col in pred_df.columns:
-        y_phys = pred_df[phys_col].to_numpy(float)
-        y_true_tot = y_phys + pred_df[f"{base}_true"].to_numpy(float)
-        y_pred_tot = y_phys + pred_df[f"{base}_pred"].to_numpy(float)
-
-        df_hybrid = pd.DataFrame({
-            f"{base}_true": y_true_tot,
-            f"{base}_pred": y_pred_tot,
-        })
-        out_png = f"figures/{scenario_name}_{tag}_{base.lower()}_hybrid.png"
-        plot_overlay(
-            df_hybrid,
-            out_png,
-            title=f"{scenario_name.capitalize()} — {base} total ({tag}, hybrid vs truth)",
-        )
-        print("saved:", out_png)
+    # 4) Build PM10 time-series for true vs predicted
+    if use_physics and f"{base}_pred_total" in pred_df.columns:
+        y_true = pred_df[f"{base}_true"].to_numpy(float)
+        y_pred = pred_df[f"{base}_pred_total"].to_numpy(float)
+        out_png = f"figures/{scenario_name}_{tag}_pm10_hybrid_overtime.png"
+        title = f"{scenario_name.capitalize()} — PM10 total ({tag}, hybrid vs truth)"
     else:
-        # case: physics OFF model – we’re already in total PM space
-        df_overlay = pd.DataFrame({
-            f"{base}_true": pred_df[f"{base}_true"],
-            f"{base}_pred": pred_df[f"{base}_pred"],
-        })
-        out_png = f"figures/{scenario_name}_{tag}_{base.lower()}_plain.png"
-        plot_overlay(
-            df_overlay,
-            out_png,
-            title=f"{scenario_name.capitalize()} — {base} (plain vs truth)",
-        )
-        print("saved:", out_png)
+        y_true = pred_df[f"{base}_true"].to_numpy(float)
+        y_pred = pred_df[f"{base}_pred"].to_numpy(float)
+        out_png = f"figures/{scenario_name}_{tag}_pm10_plain_overtime.png"
+        title = f"{scenario_name.capitalize()} — PM10 (plain vs truth)"
+
+    df_plot = pd.DataFrame({"PM10_true": y_true, "PM10_pred": y_pred})
+    df_plot.index.name = "time_step"
+    plot_overlay(df_plot, out_png, title=title)
+    print("saved:", out_png)
 
 
 if __name__ == "__main__":
-    # Booster: lines 82:428  -> iloc[81:428]
-    booster_xlsx = "data/raw/2025_09_03_10_06_44_Messfahrt_booster.xlsx"
+    booster_csv = "data/processed/booster_clean.csv"
+    stopper_csv = "data/processed/stopper_clean.csv"
 
-    # Stopper: lines 143:489 -> iloc[142:489]
-    stopper_xlsx = "data/raw/2025_09_03_10_14_44_Messfahrt_stoppper.xlsx"
+    # MATLAB cuts: 'Booster' 82:428 → iloc[81:428], 'Stopper' 143:489 → iloc[142:489]
+    booster_slice = (81, 428)
+    stopper_slice = (142, 489)
 
-    # --- with physics baseline ---
+    # --- with physics baseline model trained on 1_clean ---
     run_scenario(
-        excel_path=booster_xlsx,
-        row_start=81, row_end=428,
+        csv_path=booster_csv,
+        row_start=booster_slice[0], row_end=booster_slice[1],
         ckpt_path=".runs/tcn_phys_best.pt",
         use_physics=True,
         scenario_name="booster",
         tag="phys",
     )
     run_scenario(
-        excel_path=stopper_xlsx,
-        row_start=142, row_end=489,
+        csv_path=stopper_csv,
+        row_start=stopper_slice[0], row_end=stopper_slice[1],
         ckpt_path=".runs/tcn_phys_best.pt",
         use_physics=True,
         scenario_name="stopper",
@@ -185,16 +126,16 @@ if __name__ == "__main__":
 
     # --- without physics baseline ---
     run_scenario(
-        excel_path=booster_xlsx,
-        row_start=81, row_end=428,
+        csv_path=booster_csv,
+        row_start=booster_slice[0], row_end=booster_slice[1],
         ckpt_path=".runs/tcn_plain_best.pt",
         use_physics=False,
         scenario_name="booster",
         tag="plain",
     )
     run_scenario(
-        excel_path=stopper_xlsx,
-        row_start=142, row_end=489,
+        csv_path=stopper_csv,
+        row_start=stopper_slice[0], row_end=stopper_slice[1],
         ckpt_path=".runs/tcn_plain_best.pt",
         use_physics=False,
         scenario_name="stopper",
