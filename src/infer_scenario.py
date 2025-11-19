@@ -47,6 +47,7 @@ def load_scalers():
 
 
 def build_model(device, feat_cols):
+    """Rebuild the same architecture as in train.py for inference."""
     targs = resolved_target_cols(cfg)
     mt = cfg.model_type.lower()
 
@@ -63,7 +64,7 @@ def build_model(device, feat_cols):
         )
     else:
         model = TCNRegressor(
-            num_inputs=len(feat_cols),
+            input_size=len(feat_cols),            # 👈 important: input_size, not num_inputs
             num_channels=list(cfg.tcn_channels),
             kernel_size=cfg.tcn_kernel_size,
             dropout=cfg.dropout,
