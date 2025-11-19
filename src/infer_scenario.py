@@ -21,14 +21,13 @@ def load_scalers():
     return f_scaler, t_scaler
 
 
-def build_model(device):
-    feats = resolved_feature_cols(cfg)
+def build_model(device, feat_cols):
     targs = resolved_target_cols(cfg)
     mt = cfg.model_type.lower()
 
     if mt in ("lstm", "gru"):
         model = RNNRegressor(
-            input_size=len(feats),
+            input_size=len(feat_cols),
             hidden_size=cfg.hidden_size,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
@@ -39,7 +38,7 @@ def build_model(device):
         )
     else:
         model = TCNRegressor(
-            num_inputs=len(feats),
+            num_inputs=len(feat_cols),
             num_channels=list(cfg.tcn_channels),
             kernel_size=cfg.tcn_kernel_size,
             dropout=cfg.dropout,
@@ -47,6 +46,7 @@ def build_model(device):
         )
 
     return model.to(device)
+
 
 
 def predict_scenario(csv_path, ckpt_path, tag):
@@ -58,11 +58,23 @@ def predict_scenario(csv_path, ckpt_path, tag):
     df_raw = pd.read_csv(csv_path)
     df_feat = make_features_for_scenario(df_raw, cfg)
 
-    feat_cols = resolved_feature_cols(cfg)
-    targ_cols = resolved_target_cols(cfg)
-
     # --- 2) Load scalers from training ---
     f_scaler, t_scaler = load_scalers()
+
+    # How many features was the scaler fitted on?
+    n_feat_trained = f_scaler.n_features_in_
+
+    # Full configured feature list (may be longer)
+    feat_cols_full = resolved_feature_cols(cfg)
+
+    # Use ONLY the first n_feat_trained features (the ones used during training)
+    feat_cols = feat_cols_full[:n_feat_trained]
+
+    print("feat_cols used for inference:", feat_cols)
+    print("Scaler expects:", n_feat_trained, "features")
+    print("df_feat[feat_cols].shape:", df_feat[feat_cols].shape)
+
+    targ_cols = resolved_target_cols(cfg)
 
     # --- 3) Apply feature scaling (NO refit!!) ---
     df_scaled = df_feat.copy()
@@ -77,8 +89,8 @@ def predict_scenario(csv_path, ckpt_path, tag):
         print("[WARN] No windows for", csv_path)
         return
 
-    # --- 5) Load trained model ---
-    model = build_model(device)
+    # --- 5) Load trained model with matching input dimension ---
+    model = build_model(device, feat_cols)
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
     model.eval()
 
@@ -92,12 +104,12 @@ def predict_scenario(csv_path, ckpt_path, tag):
 
     preds = pd.DataFrame(preds, columns=[t + "_scaled_pred" for t in targ_cols])
 
-    # --- 7) Inverse-transform predictions (from scaled residual to µg/m³) ---
+    # --- 7) Inverse-transform predictions ---
     preds[targ_cols] = t_scaler.inverse_transform(
         preds[[t + "_scaled_pred" for t in targ_cols]]
     )
 
-    # for simplicity we assume one of targ_cols is "PM10_ug_per_m3" (or residual mapped back)
+    # pick the PM10 column from targets (e.g. "PM10_ug_per_m3" or residual-shifted)
     pm10_col = [c for c in targ_cols if "PM10" in c][0]
 
     # --- 8) Align predictions with truth ---
@@ -108,8 +120,11 @@ def predict_scenario(csv_path, ckpt_path, tag):
 
     # --- 9) Plot ---
     out_path = f"figures/{Path(csv_path).stem}_{tag}_pm10_overlay.png"
-    plot_overlay(df_plot, out_path,
-                 title=f"{Path(csv_path).stem} – PM10 true vs predicted ({tag})")
+    plot_overlay(
+        df_plot,
+        out_path,
+        title=f"{Path(csv_path).stem} – PM10 true vs predicted ({tag})",
+    )
 
     print("Saved:", out_path)
 
