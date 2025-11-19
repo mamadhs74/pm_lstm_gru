@@ -64,8 +64,8 @@ def build_model(device, feat_cols):
         )
     else:
         model = TCNRegressor(
-            input_size=len(feat_cols),            # 👈 important: input_size, not num_inputs
-            num_channels=list(cfg.tcn_channels),
+            input_size=len(feat_cols),
+            channels=list(cfg.tcn_channels),      
             kernel_size=cfg.tcn_kernel_size,
             dropout=cfg.dropout,
             out_dim=len(targs),
