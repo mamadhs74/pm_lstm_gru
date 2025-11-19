@@ -4,6 +4,7 @@ import pandas as pd
 import torch
 import pickle
 from pathlib import Path
+import numpy as np     
 from torch.utils.data import Dataset   
 from src.config import cfg, resolved_feature_cols, resolved_target_cols
 from src.datasets import WindowedDataset
@@ -104,14 +105,21 @@ def predict_scenario(csv_path, ckpt_path, tag):
     df_scaled = df_feat.copy()
     df_scaled[feat_cols] = f_scaler.transform(df_feat[feat_cols])
 
-    # --- 4) Build windows exactly like training, but X-only ---
-    window = int(cfg.window_s * cfg.target_hz)
+        # --- 4) Build windows for inference (clamp window <= sequence length) ---
+    window_raw = int(cfg.window_s * cfg.target_hz)
+    seq_len = len(df_scaled)
+
+    # For short scenarios like Booster/Stopper, we cap window at seq_len
+    window = min(window_raw, seq_len)
     stride = int(cfg.stride_steps)
+
+    print("window_raw:", window_raw, " -> using window:", window)
 
     ds = InferenceWindowedDataset(df_scaled, feat_cols, window, stride)
     if len(ds) == 0:
-        print("[WARN] No windows for", csv_path)
+        print("[WARN] No windows for", csv_path, "(this should not happen anymore)")
         return
+
 
     # --- 5) Load trained model with matching input dimension ---
     model = build_model(device, feat_cols)
