@@ -1,13 +1,14 @@
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 import torch
 import pickle
 from pathlib import Path
-import matplotlib.pyplot as plt
 
 from src.config import cfg, resolved_feature_cols, resolved_target_cols
 from src.preprocess import canonicalize_units_and_names, downsample, add_regime_features
 from src.models import TCNRegressor
+from src.visualize import plot_overlay
 
 
 # ------------------------------
@@ -15,131 +16,122 @@ from src.models import TCNRegressor
 # ------------------------------
 def load_scalers():
     with open(".runs/feature_scaler.pkl", "rb") as f:
-        fsc = pickle.load(f)
+        f_scaler = pickle.load(f)
     with open(".runs/target_scaler.pkl", "rb") as f:
-        tsc = pickle.load(f)
-    return fsc, tsc
+        t_scaler = pickle.load(f)
+    return f_scaler, t_scaler
 
 
 # ------------------------------
-# Preprocess scenario
+# Basic feature pipeline
 # ------------------------------
-def preprocess(df):
+def preprocess_scenario(df):
     df = canonicalize_units_and_names(df, cfg)
     df = downsample(df, cfg.orig_hz, cfg.target_hz)
     df = add_regime_features(df)
-    return df.reset_index(drop=True)
+    return df
 
 
 # ------------------------------
-# Build model
+# PM10 prediction for a scenario
 # ------------------------------
-def load_model(feat_cols):
-    model = TCNRegressor(
-        input_size=len(feat_cols),
-        out_dim=len(resolved_target_cols(cfg)),
-        channels_list=list(cfg.tcn_channels),
-        kernel_size=cfg.tcn_kernel_size,
-        dropout=cfg.dropout,
-    )
-    model.load_state_dict(torch.load(".runs/tcn_best.pt", map_location="cpu"))
-    model.eval()
-    return model
+def predict_pm10(csv_path, start_row, end_row):
+    print(f"\n=== Predicting PM10 for {csv_path} ===")
 
-
-# ------------------------------
-# Sliding-window prediction
-# ------------------------------
-def predict_timeseries(df_scaled, model, feat_cols):
-    window = int(cfg.window_s * cfg.target_hz)
-    stride = int(cfg.stride_steps)
-    X = df_scaled[feat_cols].values.astype(np.float32)
-
-    preds = []
-    for start in range(0, len(X) - window + 1, stride):
-        xb = torch.tensor(X[start:start+window]).unsqueeze(0)
-        with torch.no_grad():
-            yp = model(xb).cpu().numpy().squeeze()
-        preds.append(yp)
-
-    return np.array(preds)
-
-
-# ------------------------------
-# Predict all 3 PM counts + summed total
-# ------------------------------
-def predict_all_counts(csv_path):
+    # 1) Load CSV and cut rows
     df_raw = pd.read_csv(csv_path)
-    df_feat = preprocess(df_raw)
+    df_raw = df_raw.iloc[start_row:end_row].reset_index(drop=True)
+    print("Cut rows:", len(df_raw))
+
+    # 2) Apply feature engineering
+    df_feat = preprocess_scenario(df_raw)
 
     feat_cols = resolved_feature_cols(cfg)
     targ_cols = resolved_target_cols(cfg)
 
-    # Load scalers
-    fsc, tsc = load_scalers()
+    # 3) Load scalers
+    f_scaler, t_scaler = load_scalers()
 
-    # Feature scaling
+    # 4) Apply feature scaling
     df_scaled = df_feat.copy()
-    df_scaled[feat_cols] = fsc.transform(df_feat[feat_cols])
+    df_scaled[feat_cols] = f_scaler.transform(df_feat[feat_cols])
 
-    # Load model
-    model = load_model(feat_cols)
+    # 5) Load trained model
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Predict (scaled residual-shift)
-    preds_scaled = predict_timeseries(df_scaled, model, feat_cols)
-    preds_real = tsc.inverse_transform(preds_scaled)
+    model = TCNRegressor(
+        len(feat_cols),
+        len(targ_cols),
+        list(cfg.tcn_channels),
+        cfg.tcn_kernel_size,
+        cfg.dropout,
+    ).to(device)
 
-    # Extract indices
-    idx_pm1 = targ_cols.index("PM1_count_resid_shift")
-    idx_pm25 = targ_cols.index("PM2_5_count_resid_shift")
-    idx_pm10 = targ_cols.index("PM10_count_resid_shift")
+    model.load_state_dict(torch.load(".runs/tcn_best.pt", map_location=device))
+    model.eval()
 
-    PM1 = preds_real[:, idx_pm1]
-    PM25 = preds_real[:, idx_pm25]
-    PM10 = preds_real[:, idx_pm10]
+    # 6) Predict frame-by-frame (NO windows)
+    preds_scaled = []
 
-    # Total particle count
-    PM_TOTAL = PM1 + PM25 + PM10
+    with torch.no_grad():
+        for i in range(len(df_scaled)):
+            x = df_scaled[feat_cols].iloc[i].values.astype(np.float32)
+            x = torch.tensor(x).unsqueeze(0).unsqueeze(0).to(device)  # shape (1,1,F)
+            y = model(x)
+            preds_scaled.append(y.cpu().numpy().squeeze())
 
-    return PM1, PM25, PM10, PM_TOTAL
+    preds_scaled = np.vstack(preds_scaled)
+
+    # 7) Inverse-transform
+    preds_real = t_scaler.inverse_transform(preds_scaled)
+
+    # 8) Extract PM10
+    # Extract all 3 PM count predictions
+    pm1_idx     = targ_cols.index("PM1_count")
+    pm25_idx    = targ_cols.index("PM2_5_count")
+    pm10_idx    = targ_cols.index("PM10_count")
+
+    pm1_pred  = preds_real[:, pm1_idx]
+    pm25_pred = preds_real[:, pm25_idx]
+    pm10_pred = preds_real[:, pm10_idx]
+
+    # SUM OF ALL THREE
+    pm_sum_pred = pm1_pred + pm25_pred + pm10_pred
+
+
+    # 9) Save CSV
+    out_csv = f"figures/{Path(csv_path).stem}_pm10_predicted.csv"
+    df_out = pd.DataFrame({
+        "PM1_pred":  pm1_pred,
+        "PM2_5_pred": pm25_pred,
+        "PM10_pred": pm10_pred,
+        "PM_SUM_pred": pm_sum_pred
+    })
+
+    df_out.to_csv(out_csv, index=False)
+
+    print("Saved predictions:", out_csv)
+
+    # 10) Save plot
+    out_png = f"figures/{Path(csv_path).stem}_pm10_plot.png"
+    df_plot = pd.DataFrame({
+        "PM_SUM_pred": pm_sum_pred
+    })
+
+    plot_overlay(
+        df_plot,
+        out_png,
+        title=f"{Path(csv_path).stem} — PM SUM predicted"
+    )
+
+    print("Saved plot:", out_png)
+
+    return pm10_pred
 
 
 # ------------------------------
-# Main
+# RUN FOR BOTH SCENARIOS
 # ------------------------------
 if __name__ == "__main__":
-    booster_path = "data/processed/booster_clean.csv"
-    stopper_path = "data/processed/stopper_clean.csv"
-
-    # Predict both scenarios
-    b_PM1, b_PM25, b_PM10, b_TOTAL = predict_all_counts(booster_path)
-    s_PM1, s_PM25, s_PM10, s_TOTAL = predict_all_counts(stopper_path)
-
-    # Save to CSV
-    pd.DataFrame({
-        "PM1_pred": b_PM1,
-        "PM2_5_pred": b_PM25,
-        "PM10_pred": b_PM10,
-        "PM_TOTAL_pred": b_TOTAL
-    }).to_csv("booster_count_predictions.csv", index=False)
-
-    pd.DataFrame({
-        "PM1_pred": s_PM1,
-        "PM2_5_pred": s_PM25,
-        "PM10_pred": s_PM10,
-        "PM_TOTAL_pred": s_TOTAL
-    }).to_csv("stopper_count_predictions.csv", index=False)
-
-    # Plot total count comparison
-    plt.figure(figsize=(12, 6))
-    plt.plot(b_TOTAL, label="Booster PM_TOTAL")
-    plt.plot(s_TOTAL, label="Stopper PM_TOTAL")
-    plt.title("Predicted Total Particle Count (PN_total) — Booster vs Stopper")
-    plt.xlabel("Window index (stride = 1s)")
-    plt.ylabel("Total particle count")
-    plt.legend()
-    plt.grid()
-    plt.savefig("figures/booster_vs_stopper_PM_TOTAL.png")
-    plt.show()
-
-    print("Saved predictions + plot.")
+    booster_pred = predict_pm10("data/processed/booster_clean.csv", 82, 428)
+    stopper_pred = predict_pm10("data/processed/stopper_clean.csv", 143, 489)
