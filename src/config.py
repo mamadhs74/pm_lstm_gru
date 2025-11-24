@@ -12,9 +12,9 @@ class Config:
     # ---- sampling & windowing ----
     orig_hz: int = 10
     target_hz: int = 5
-    window_s: int = 90           # 200 steps @5 Hz
+    window_s: int = 20           # 200 steps @5 Hz
     target_shift_s: int = 15     # predict t+20 s
-    stride_steps: int = 10        # 1 s stride @5 Hz
+    stride_steps: int = 1        # 1 s stride @5 Hz
 
         # ---- CV / splitting ----
     n_folds: int = 5
@@ -38,7 +38,7 @@ class Config:
     ]
 
 
-    target_cols = ["PM10_ug_per_m3","PM2_5_ug_per_m3","PM1_ug_per_m3"]
+    target_cols = ["PM1_count", "PM2_5_count", "PM10_count"]
 
      # ---- model ----
     model_type: str = "tcn"              # "lstm", "gru", or "tcn"
@@ -135,10 +135,7 @@ def resolved_feature_cols(cfg: Config):
     return cfg.feature_cols
 
 
-def resolved_target_cols(cfg: Config):
-    if getattr(cfg, "use_physics_baseline", False):
-        return [f"{c}_resid_phys_shift" for c in cfg.target_cols]
-    else:
-        return [f"{c}_resid_shift" for c in cfg.target_cols]
+def resolved_target_cols(cfg):
+    return cfg.target_cols
 
 cfg = Config()

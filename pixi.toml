@@ -19,6 +19,10 @@ report_advanced = "python -m src.report_advanced_plots"
 scenario_eval = "python -m src.scenario_eval"
 predict_booster_stopper = "python -m src.predict_booster_stopper"
 infer_scenario = "python -m src.infer_scenario"
+plot_pm10 = "python -m src.plot_pm10" 
+predict_cut_scenarios = "python -m src.predict_cut_scenarios" 
+
+
 
 
 

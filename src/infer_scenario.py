@@ -162,8 +162,10 @@ def predict_scenario(csv_path, ckpt_path, tag):
 
     # 9) No true PM available, plot prediction only
     df_plot = pd.DataFrame({
-        "PM10_pred": pm10_pred
+    "PM10_true": np.zeros_like(pm10_pred),   # dummy line
+    "PM10_pred": pm10_pred
     })
+
 
     print("preds_real[0:20] =", preds_real[:20])
 
