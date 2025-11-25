@@ -5,7 +5,8 @@ import math
 @dataclass
 class Config:
     # ---- data paths ----
-    data_path: str = "data/processed/1_clean.csv"
+    # data_path: str = "data/processed/1_clean.csv"
+    data_path: str = "data/processed/1_clean_decimal_fixed.csv"
     processed_dir: str = "data/processed"
     seed: int = 42
 
@@ -29,7 +30,6 @@ class Config:
         "yaw_deg_s",
         "acc_lat_ms2",
         "steer_rate_deg_s",
-        "rpm",
         "ambient_temp_c",
         "wheel_fl_kmh",
         "wheel_fr_kmh",
@@ -37,8 +37,8 @@ class Config:
         "wheel_rr_kmh",
     ]
 
-
-    target_cols = ["PM1_count", "PM2_5_count", "PM10_count"]
+    target_cols = ["P_HA"]
+    # target_cols = ["PM1_count", "PM2_5_count", "PM10_count"]
 
      # ---- model ----
     model_type: str = "tcn"              # "lstm", "gru", or "tcn"
