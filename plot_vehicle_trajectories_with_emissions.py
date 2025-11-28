@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 import pandas as pd
 import numpy as np
+import re
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
 import matplotlib.cm as cm
 import os
-import re
 
 CSV_PATH = "GothaerPlatz_017_vehicles.csv"
 
@@ -14,65 +14,113 @@ LAT_COL = "LATWGS84"
 LON_COL = "LONGWGS84"
 EMI_COL = "EMISSIONSPM10TOTAL"
 
-MIN_POINTS = 5
 os.makedirs("figures", exist_ok=True)
 
+
+# -----------------------------
+# Universal coordinate parser
+# -----------------------------
+def parse_coord(val):
+    if pd.isna(val):
+        return np.nan
+    
+    s = str(val).strip()
+
+    # 1) replace comma decimal
+    s = s.replace(",", ".")
+
+    # 2) detect degrees-minutes-seconds
+    dms = re.match(
+        r"(\d+)[^\d]+(\d+)[^\d]+(\d+\.?\d*)", s
+    )
+    if dms:
+        d, m, sec = map(float, dms.groups())
+        return d + m/60 + sec/3600
+
+    # 3) extract pure number
+    num = re.findall(r"[-+]?\d*\.\d+|[-+]?\d+", s)
+    if num:
+        return float(num[0])
+
+    return np.nan
+
+
+# -----------------------------
+# Load file
+# -----------------------------
 print("Loading CSV…")
-df = pd.read_csv(CSV_PATH, sep=r"[;,|\s]+", engine="python")
+df = pd.read_csv(CSV_PATH, sep=r"[;,\s]+", engine="python")
 print("Loaded rows:", len(df))
 print("Columns:", df.columns.tolist())
 
-# Convert decimal commas to dots if present
-for col in [LAT_COL, LON_COL, EMI_COL]:
-    df[col] = (
-        df[col]
-        .astype(str)
-        .str.replace(",", ".", regex=False)
-        .str.extract(r"([-+]?\d*\.?\d+)")
-    )
-    df[col] = pd.to_numeric(df[col], errors="coerce")
 
-# Drop missing coordinates
+# -----------------------------
+# Parse Lat / Lon robustly
+# -----------------------------
+df[LAT_COL] = df[LAT_COL].apply(parse_coord)
+df[LON_COL] = df[LON_COL].apply(parse_coord)
+
+# Drop invalid points
 df = df.dropna(subset=[LAT_COL, LON_COL])
 
-veh_ids = sorted(df[VEH_ID_COL].unique())
+print("After cleaning coordinates:", len(df))
 
-base_colors = list(cm.get_cmap("tab20").colors)
-while len(base_colors) < len(veh_ids):
-    base_colors += base_colors
+
+# -----------------------------
+# Parse emission column
+# -----------------------------
+df[EMI_COL] = (
+    df[EMI_COL]
+    .astype(str)
+    .str.replace(",", ".")
+    .str.extract(r"([-+]?\d*\.\d+|[-+]?\d+)")
+)
+df[EMI_COL] = pd.to_numeric(df[EMI_COL], errors="coerce").fillna(0)
+
+
+# -----------------------------
+# Plotting
+# -----------------------------
+veh_ids = sorted(df[VEH_ID_COL].unique())
 
 plt.figure(figsize=(12, 8))
 ax = plt.gca()
 
+base_colors = list(cm.get_cmap("tab20").colors)
+
 for idx, vid in enumerate(veh_ids):
     sub = df[df[VEH_ID_COL] == vid]
-    if len(sub) < MIN_POINTS:
+    if len(sub) < 5:
         continue
 
     xs = sub[LON_COL].values
     ys = sub[LAT_COL].values
-    em = sub[EMI_COL].fillna(0).values
+    em = sub[EMI_COL].values
 
     em_norm = (em - em.min()) / (em.max() - em.min() + 1e-9)
 
+    # prepare line segments
     points = np.array([xs, ys]).T.reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
-    r, g, b = base_colors[idx]
-    colors = [(r * (0.3 + 0.7 * v), g * (0.3 + 0.7 * v), b * (0.3 + 0.7 * v)) for v in em_norm]
+    # darken base color according to emission
+    r, g, b = base_colors[idx % len(base_colors)]
+    colors = [(r*(0.3+0.7*v), g*(0.3+0.7*v), b*(0.3+0.7*v)) for v in em_norm]
 
     lc = LineCollection(segments, colors=colors, linewidths=2)
     ax.add_collection(lc)
 
-    plt.text(xs[0], ys[0], str(vid), fontsize=7, color=base_colors[idx])
+    # mark starting point
+    ax.text(xs[0], ys[0], str(vid), fontsize=6, color=(r, g, b))
+
 
 plt.xlabel("Longitude")
 plt.ylabel("Latitude")
-plt.title("Vehicle Trajectories With Emission Intensity")
+plt.title("Vehicle Trajectories with Emission Intensity")
 plt.grid(True)
 plt.tight_layout()
 
-out_file = f"figures/vehicle_trajectories_{EMI_COL}.png"
+out_file = "figures/vehicle_trajectories_fixed.png"
 plt.savefig(out_file, dpi=300)
 plt.show()
 
