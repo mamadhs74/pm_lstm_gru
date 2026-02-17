@@ -1,65 +1,116 @@
-# plot_p_va_over_time.py
-
+#!/usr/bin/env python3
+import numpy as np
 import pandas as pd
+import torch
+import pickle
 import matplotlib.pyplot as plt
-from pathlib import Path
 
-CSV_PATH = "data/processed/1_clean_decimal_fixed.csv"   # change if needed
-P_VA_COL = "P_VA"  # <-- set exact column name here
+from src.config import cfg, resolved_feature_cols, resolved_target_cols
+from src.preprocess import canonicalize_units_and_names, downsample, add_regime_features
+from src.models import TCNRegressor
 
-def main():
-    print(f"Loading: {CSV_PATH}")
-    df = pd.read_csv(CSV_PATH)
 
-    # ----------------------------------------
-    # FIND THE CORRECT TIME COLUMN
-    # ----------------------------------------
-    time_candidates = ["time_s", "X_Achse_[s]", "timestamp", "Zeitstempel"]
+# ---------------------------------------
+# Load scalers
+# ---------------------------------------
+def load_scalers():
+    with open(".runs/feature_scaler.pkl", "rb") as f:
+        fsc = pickle.load(f)
+    with open(".runs/target_scaler.pkl", "rb") as f:
+        tsc = pickle.load(f)
+    return fsc, tsc
 
-    time_col = None
-    for c in time_candidates:
-        if c in df.columns:
-            time_col = c
-            break
 
-    if time_col is None:
-        print("No explicit time column found — using index instead.")
-        t = df.index
-        t_label = "sample index"
-    else:
-        t = df[time_col].astype(float)
-        t_label = time_col
-        print(f"Using time column: {time_col}")
+# ---------------------------------------
+# Preprocess
+# ---------------------------------------
+def preprocess(df):
+    df = canonicalize_units_and_names(df, cfg)
+    df = downsample(df, cfg.orig_hz, cfg.target_hz)
+    df = add_regime_features(df)
+    return df.reset_index(drop=True)
 
-    # ----------------------------------------
-    # READ P_VA column
-    # ----------------------------------------
-    if P_VA_COL not in df.columns:
-        raise KeyError(
-            f"Column '{P_VA_COL}' not found.\n"
-            f"Available columns: {df.columns.tolist()}"
-        )
 
-    y = df[P_VA_COL].astype(float)
+# ---------------------------------------
+# Predict using window-based TCN
+# ---------------------------------------
+def predict_series(df_scaled, model, feat_cols):
+    window = int(cfg.window_s * cfg.target_hz)
+    stride = cfg.stride_steps
 
-    # ----------------------------------------
-    # PLOT
-    # ----------------------------------------
+    X = df_scaled[feat_cols].values.astype(np.float32)
+    preds = []
+
+    for start in range(0, len(X) - window + 1, stride):
+        xb = torch.tensor(X[start:start+window]).unsqueeze(0)
+        with torch.no_grad():
+            yp = model(xb).cpu().numpy().squeeze()
+        preds.append(yp)
+
+    return np.array(preds)
+
+
+# ---------------------------------------
+# Plot truth vs predicted P_VA
+# ---------------------------------------
+def plot_pva(csv_path):
+
+    # Load CSV
+    df = pd.read_csv(csv_path)
+
+    # Preprocess
+    df_feat = preprocess(df)
+    feat_cols = resolved_feature_cols(cfg)
+    targ_cols = resolved_target_cols(cfg)
+
+    # Load scalers
+    fsc, tsc = load_scalers()
+
+    df_scaled = df_feat.copy()
+    df_scaled[feat_cols] = fsc.transform(df_feat[feat_cols])
+
+    # Load model
+    model = TCNRegressor(
+        input_size=len(feat_cols),
+        out_dim=len(targ_cols),
+        channels_list=list(cfg.tcn_channels),
+        kernel_size=cfg.tcn_kernel_size,
+        dropout=cfg.dropout,
+    )
+    model.load_state_dict(torch.load(".runs/tcn_best.pt", map_location="cpu"))
+    model.eval()
+
+    # Predict
+    preds_scaled = predict_series(df_scaled, model, feat_cols)
+
+    # FIX 1 — remove NaNs
+    preds_scaled = preds_scaled[~np.isnan(preds_scaled)]
+
+    # FIX 2 — reshape to 2D
+    preds_real = tsc.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
+
+    # Target column
+    pva_col = targ_cols[0]
+
+    # FIX 3 — align truth length with predictions
+    pva_true = df_feat[pva_col].iloc[:len(preds_real)]
+
+    # Plot
     plt.figure(figsize=(12, 6))
-    plt.plot(t, y, label=P_VA_COL, linewidth=2)
-    plt.title(f"{P_VA_COL} over time")
-    plt.xlabel(t_label)
-    plt.ylabel(P_VA_COL)
-    plt.grid(True)
+    plt.plot(pva_true.values, label="True P_VA", color="blue")
+    plt.plot(preds_real, label="Predicted P_VA", color="orange")
+    plt.title("P_VA Over Time — Truth vs Prediction")
+    plt.xlabel("Time Index")
+    plt.ylabel("P_VA")
     plt.legend()
-    plt.tight_layout()
+    plt.grid()
 
-    out_path = Path("figures") / f"{P_VA_COL}_over_time.png"
-    Path("figures").mkdir(exist_ok=True)
-    plt.savefig(out_path)
+    out = "figures/P_VA_truth_vs_prediction.png"
+    plt.savefig(out, dpi=300)
     plt.show()
 
-    print(f"Saved plot to: {out_path}")
+    print("Saved:", out)
+
 
 if __name__ == "__main__":
-    main()
+    plot_pva("data/processed/1_clean_decimal_fixed.csv")

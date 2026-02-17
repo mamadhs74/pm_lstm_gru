@@ -249,7 +249,6 @@ def main():
         ).to(device)
     else:
         raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
-
     model.load_state_dict(torch.load(ckpt, map_location=device))
 
     # Optional sanity check without relying on a custom attribute:

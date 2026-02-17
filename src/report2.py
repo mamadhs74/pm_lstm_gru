@@ -48,8 +48,11 @@ def _predict_df(model, ds):
     for xb, yb in loader:
         xb, yb = xb.to(device), yb.to(device)
         yp = model(xb)
-        truths.append(yb.cpu().numpy())
-        preds.append(yp.cpu().numpy())
+        if isinstance(yp, (tuple, list)):
+            yp = yp[0]
+        truths.append(yb.detach().cpu().numpy())
+        preds.append(yp.detach().cpu().numpy())
+
 
     if not truths:
         return pd.DataFrame()
@@ -119,7 +122,9 @@ def main():
         return
 
     # Align regime/aux columns with end-of-window targets
-    aligned = test_df.iloc[window : window + len(pred_df)].reset_index(drop=True)
+    end_idxs = [e - 1 for (s, e) in test_ds.indices]
+    aligned = test_df.iloc[end_idxs].reset_index(drop=True)
+
 
     # --- Extra figures ---
 

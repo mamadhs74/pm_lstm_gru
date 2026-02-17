@@ -30,8 +30,11 @@ def _predict_df(model, ds, device, display_names, test_df_for_phys=None):
     for xb, yb in loader:
         xb, yb = xb.to(device), yb.to(device)
         yp = model(xb)
-        truths.append(yb.cpu().numpy())
-        preds.append(yp.cpu().numpy())
+        if isinstance(yp, (tuple, list)):
+            yp = yp[0]
+        truths.append(yb.detach().cpu().numpy())
+        preds.append(yp.detach().cpu().numpy())
+
 
     if not truths:
         return pd.DataFrame()
@@ -56,13 +59,16 @@ def _predict_df(model, ds, device, display_names, test_df_for_phys=None):
         if have_all_phys:
             for t in display_names:
                 base = _base_name(t)
-                phys = test_df_for_phys.loc[end_idxs, f"{base}_phys"].to_numpy(dtype=float)
+                phys = test_df_for_phys.iloc[end_idxs][f"{base}_phys"].to_numpy(dtype=float)
                 df_pred[f"{base}_phys"] = phys
                 df_pred[f"{base}_pred_total"] = phys + df_pred[f"{base}_pred"].to_numpy(dtype=float)
     return df_pred
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    from pathlib import Path
+    Path("figures").mkdir(parents=True, exist_ok=True)
+    Path("data/processed").mkdir(parents=True, exist_ok=True)
 
     # --- Use the SAME preprocessing as training
     raw = pd.read_csv(cfg.data_path).dropna(subset=cfg.target_cols)
@@ -72,7 +78,11 @@ def main():
     window = int(cfg.window_s * cfg.target_hz)
     stride = int(cfg.stride_steps)
     feat_cols = resolved_feature_cols(cfg)          
-    targ_cols = resolved_target_cols(cfg)   
+    targ_cols = resolved_target_cols(cfg)  
+    print("cfg.target_cols:", cfg.target_cols)
+    print("resolved_target_cols(cfg):", targ_cols)
+    assert len(targ_cols) == len(cfg.target_cols)
+    
 
 
     test_df = splits["test"].reset_index(drop=True)
@@ -136,6 +146,24 @@ def main():
     # Align regime flags with predictions using window end indices
     end_idxs = [e - 1 for (s, e) in test_ds.indices]
     aligned = test_df.iloc[end_idxs].reset_index(drop=True).copy()
+    from src.report_more import residual_autocorr, plot_error_acf_panel
+
+    # residual-space error ACF (optional)
+    residual_autocorr(
+        pred_df["PM2_5_true"].to_numpy() - pred_df["PM2_5_pred"].to_numpy(),
+        "figures/fig_acf_pm25_resid.png",
+        max_lag=200,
+        title="Residual-space error ACF (PM2.5)"
+    )
+
+    # physics-only vs hybrid error ACF (recommended)
+    plot_error_acf_panel(
+        aligned_df=aligned,
+        pred_df=pred_df,
+        out_png="figures/fig_acf_pm25_error_panel.png",
+        target_short="PM2_5",
+        max_lag=200
+    )
 
     # Diagnostics expect 'brake', 'idle', and 'cruise'
     if "brake" not in aligned.columns and "brake_event" in aligned.columns:

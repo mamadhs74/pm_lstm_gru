@@ -35,9 +35,10 @@ class Config:
         "wheel_fr_kmh",
         "wheel_rl_kmh",
         "wheel_rr_kmh",
+        
     ]
 
-    target_cols = ["P_HA"]
+    target_cols = ["P_VA"]
     # target_cols = ["PM1_count", "PM2_5_count", "PM10_count"]
 
      # ---- model ----
