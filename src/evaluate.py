@@ -148,8 +148,6 @@ def main():
     aligned = test_df.iloc[end_idxs].reset_index(drop=True).copy()
     from src.report_more import residual_autocorr, plot_error_acf_panel
 
-    # residual-space error ACF (optional)
-    from src.report_more import residual_autocorr, plot_error_acf_panel
 
     # pick the first target from config (works for single-target P_VA too)
     t0 = cfg.target_cols[0]
@@ -190,25 +188,24 @@ def main():
     # Your overlay expects columns {PM*_true, PM*_pred}
     plot_overlay(pred_df, "figures/overlay_test_residuals.png", title="Test — residuals (true vs pred)")
 
-    # Parity & histogram for PM2.5 residuals
-    pm2 = "PM2_5"
+    # Parity & histogram for the first configured target
     plot_parity(
-        pred_df[f"{pm2}_true"].values,
-        pred_df[f"{pm2}_pred"].values,
-        "figures/parity_pm25_test.png",
-        title="Parity PM2.5 (residual)"
+        pred_df[f"{base0}_true"].values,
+        pred_df[f"{base0}_pred"].values,
+        f"figures/parity_{base0.lower()}_test.png",
+        title=f"Parity {base0} (residual)"
     )
     plot_residual_hist(
-        pred_df[f"{pm2}_true"].values - pred_df[f"{pm2}_pred"].values,
-        "figures/resid_hist_pm25_test.png",
-        title="Residual Histogram PM2.5 (residual)"
+        pred_df[f"{base0}_true"].values - pred_df[f"{base0}_pred"].values,
+        f"figures/resid_hist_{base0.lower()}_test.png",
+        title=f"Residual Histogram {base0} (residual)"
     )
 
     print("Wrote:")
     print(f" - {out_csv}")
     print(" - figures/overlay_test_residuals.png")
-    print(" - figures/parity_pm25_test.png")
-    print(" - figures/resid_hist_pm25_test.png")
+    print(f" - figures/parity_{base0.lower()}_test.png")
+    print(f" - figures/resid_hist_{base0.lower()}_test.png")
 
     # --- Optional: Hybrid overlays in PHYSICAL units (physics + residual) ---
     # Works only if physics baseline columns were added by prepare_frames()
