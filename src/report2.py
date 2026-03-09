@@ -129,11 +129,6 @@ def main():
     aligned = test_df.iloc[end_idxs].reset_index(drop=True)
 
 
-    # --- Extra figures ---
-
-    # determine base target name
-    t0 = cfg.target_cols[0]
-    base0 = t0.split("_ug")[0] if "_ug" in t0 else t0
 
     # 3a) Binned MAE vs speed
     binned_mae(
