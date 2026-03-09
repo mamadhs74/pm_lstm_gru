@@ -119,9 +119,11 @@ def main():
     if pred_df.empty:
         print("[report2] No test windows; nothing to plot.")
         return
+
     # determine target dynamically
     t0 = cfg.target_cols[0]
     base0 = t0.split("_ug")[0] if "_ug" in t0 else t0
+
     # Align regime/aux columns with end-of-window targets
     end_idxs = [e - 1 for (s, e) in test_ds.indices]
     aligned = test_df.iloc[end_idxs].reset_index(drop=True)
@@ -164,10 +166,18 @@ def main():
         print(f"[report2] skipped brake-onset plot (target={base0})")
 
     # 3e) Hybrid vs physics overlay for PM10 (if physics cols exist)
-    try:
-        plot_hybrid_vs_physics(aligned, pred_df, "figures/fig_hybrid_vs_physics_pm10.png")
-    except Exception as e:
-        print("[report2] Skipped hybrid_vs_physics (missing physics columns):", e)
+    if base0.startswith("PM"):
+        try:
+            plot_hybrid_vs_physics(
+                aligned,
+                pred_df,
+                f"figures/fig_hybrid_vs_physics_{base0.lower()}.png",
+                target_col=t0,
+            )
+        except Exception as e:
+            print("[report2] Skipped hybrid_vs_physics:", e)
+    else:
+        print(f"[report2] skipped hybrid_vs_physics (target={base0})")
 
     # 3f) Permutation feature importance (small loader; may be slow)
     try:
