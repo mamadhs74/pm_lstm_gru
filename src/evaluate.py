@@ -13,8 +13,8 @@ from src.visualize import plot_overlay, plot_parity, plot_residual_hist
 from src.diagnostics import regime_metrics
 
 def _base_name(col: str) -> str:
-    # "PM10_ug_per_m3" -> "PM10"
-    return col.split("_ug")[0]
+    # "PM10_ug_per_m3" -> "PM10", "P_VA" -> "P_VA"
+    return col.split("_ug")[0] if "_ug" in col else col
 
 @torch.no_grad()
 def _predict_df(model, ds, device, display_names, test_df_for_phys=None):
@@ -149,22 +149,31 @@ def main():
     from src.report_more import residual_autocorr, plot_error_acf_panel
 
     # residual-space error ACF (optional)
+    from src.report_more import residual_autocorr, plot_error_acf_panel
+
+    # pick the first target from config (works for single-target P_VA too)
+    t0 = cfg.target_cols[0]
+    base0 = _base_name(t0)
+
+    # Residual-space error ACF (always valid)
     residual_autocorr(
-        pred_df["PM2_5_true"].to_numpy() - pred_df["PM2_5_pred"].to_numpy(),
-        "figures/fig_acf_pm25_resid.png",
+        pred_df[f"{base0}_true"].to_numpy() - pred_df[f"{base0}_pred"].to_numpy(),
+        f"figures/fig_acf_{base0.lower()}_resid.png",
         max_lag=200,
-        title="Residual-space error ACF (PM2.5)"
+        title=f"Residual-space error ACF ({base0})"
     )
 
-    # physics-only vs hybrid error ACF (recommended)
-    plot_error_acf_panel(
-        aligned_df=aligned,
-        pred_df=pred_df,
-        out_png="figures/fig_acf_pm25_error_panel.png",
-        target_short="PM2_5",
-        max_lag=200
-    )
-
+    # Physics-only vs hybrid error ACF (only if physics columns exist)
+    try:
+        plot_error_acf_panel(
+            aligned_df=aligned,
+            pred_df=pred_df,
+            out_png=f"figures/fig_acf_{base0.lower()}_error_panel.png",
+            target_short=base0,
+            max_lag=200
+        )
+    except Exception as e:
+        print(f"[evaluate] Skipped error ACF panel (likely missing physics or truth cols): {e}")
     # Diagnostics expect 'brake', 'idle', and 'cruise'
     if "brake" not in aligned.columns and "brake_event" in aligned.columns:
         aligned["brake"] = aligned["brake_event"].astype(int)

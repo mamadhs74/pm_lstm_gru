@@ -61,8 +61,7 @@ def _predict_df(model, ds):
     ypred = np.vstack(preds)
 
     # Map to base names for plots
-    name_map = {"PM10_ug_per_m3": "PM10", "PM2_5_ug_per_m3": "PM2_5", "PM1_ug_per_m3": "PM1"}
-    bases = [name_map[c] for c in cfg.target_cols]
+    bases = [c.split("_ug")[0] if "_ug" in c else c for c in cfg.target_cols]
 
     out = {}
     for i, b in enumerate(bases):
@@ -120,7 +119,9 @@ def main():
     if pred_df.empty:
         print("[report2] No test windows; nothing to plot.")
         return
-
+    # determine target dynamically
+    t0 = cfg.target_cols[0]
+    base0 = t0.split("_ug")[0] if "_ug" in t0 else t0
     # Align regime/aux columns with end-of-window targets
     end_idxs = [e - 1 for (s, e) in test_ds.indices]
     aligned = test_df.iloc[end_idxs].reset_index(drop=True)
@@ -128,33 +129,39 @@ def main():
 
     # --- Extra figures ---
 
-    # 3a) Binned MAE vs speed for PM2.5 residuals (use positional args)
+    # determine base target name
+    t0 = cfg.target_cols[0]
+    base0 = t0.split("_ug")[0] if "_ug" in t0 else t0
+
+    # 3a) Binned MAE vs speed
     binned_mae(
-    pred_df["PM2_5_true"].values,
-    pred_df["PM2_5_pred"].values,
-    aligned["speed_kmh"].values,
-    20,  # number of bins
-    "figures/fig_binned_mae_pm25_speed.png",
+        pred_df[f"{base0}_true"].values,
+        pred_df[f"{base0}_pred"].values,
+        aligned["speed_kmh"].values,
+        20,
+        f"figures/fig_binned_mae_{base0.lower()}_speed.png",
     )
 
-
-    # 3b) Residual autocorrelation (PM2.5 residuals)
+    # 3b) Residual autocorrelation
     residual_autocorr(
-        pred_df["PM2_5_true"].values - pred_df["PM2_5_pred"].values,
-        "figures/fig_acf_pm25_resid.png",
+        pred_df[f"{base0}_true"].values - pred_df[f"{base0}_pred"].values,
+        f"figures/fig_acf_{base0.lower()}_resid.png",
     )
 
-    # 3c) Rolling MAE (example: 10-minute window @ 5 Hz = 3000 samples)
+    # 3c) Rolling MAE
     rolling_mae(
-        pred_df["PM2_5_true"].values,
-        pred_df["PM2_5_pred"].values,
+        pred_df[f"{base0}_true"].values,
+        pred_df[f"{base0}_pred"].values,
         3000,
-        "figures/fig_rolling_mae_pm25.png",
+        f"figures/fig_rolling_mae_{base0.lower()}.png",
     )
 
     # 3d) Brake-onset average residuals
-    avg_df = brake_onset_average(aligned, pred_df, 5, 15, cfg.target_hz)  # pre=5s, post=15s
-    plot_brake_onset_average(avg_df, "figures/fig_brake_onset_avg_pm25.png")
+    if base0 == "PM2_5":
+        avg_df = brake_onset_average(aligned, pred_df, 5, 15, cfg.target_hz)
+        plot_brake_onset_average(avg_df, "figures/fig_brake_onset_avg_pm25.png")
+    else:
+        print(f"[report2] skipped brake-onset plot (target={base0})")
 
     # 3e) Hybrid vs physics overlay for PM10 (if physics cols exist)
     try:
