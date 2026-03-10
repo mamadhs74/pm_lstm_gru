@@ -127,6 +127,29 @@ def main():
     # Predict in residual space; if physics columns present in test_df, also make hybrid columns
     # Physics columns exist iff cfg.use_physics_baseline=True and your prepare_frames added *_phys.
     pred_df = _predict_df(model, test_ds, device, display_names, test_df_for_phys=test_df)
+        # Inverse-transform predictions back to physical target space when possible
+    target_scaler = splits.get("_target_scaler", None)
+    pred_phys_df = None
+
+    if target_scaler is not None and len(display_names) == 1:
+        base0 = _base_name(display_names[0])
+
+        y_true_scaled = pred_df[f"{base0}_true"].to_numpy().reshape(-1, 1)
+        y_pred_scaled = pred_df[f"{base0}_pred"].to_numpy().reshape(-1, 1)
+
+        y_true_phys = target_scaler.inverse_transform(y_true_scaled).ravel()
+        y_pred_phys = target_scaler.inverse_transform(y_pred_scaled).ravel()
+
+        pred_phys_df = pd.DataFrame({
+            f"{base0}_true": y_true_phys,
+            f"{base0}_pred": y_pred_phys,
+        })
+
+        mae_phys = float(np.mean(np.abs(y_true_phys - y_pred_phys)))
+        rmse_phys = float(np.sqrt(np.mean((y_true_phys - y_pred_phys) ** 2)))
+
+        print(f"Test MAE ({base0}, physical units):", mae_phys)
+        print(f"Test RMSE ({base0}, physical units):", rmse_phys)
     if pred_df.empty:
         print("No test windows; nothing to evaluate.")
         return
@@ -188,25 +211,72 @@ def main():
     # Your overlay expects columns {PM*_true, PM*_pred}
     plot_overlay(pred_df, "figures/overlay_test_residuals.png", title="Test — residuals (true vs pred)")
 
-    # Parity & histogram for the first configured target
+    # Scaled-space parity & histogram
     plot_parity(
         pred_df[f"{base0}_true"].values,
         pred_df[f"{base0}_pred"].values,
-        f"figures/parity_{base0.lower()}_test.png",
-        title=f"Parity {base0} (residual)"
+        f"figures/parity_{base0.lower()}_scaled_test.png",
+        title=f"Parity {base0} (scaled)"
     )
     plot_residual_hist(
         pred_df[f"{base0}_true"].values - pred_df[f"{base0}_pred"].values,
-        f"figures/resid_hist_{base0.lower()}_test.png",
-        title=f"Residual Histogram {base0} (residual)"
+        f"figures/resid_hist_{base0.lower()}_scaled_test.png",
+        title=f"Residual Histogram {base0} (scaled)"
     )
+
+    # Physical-space parity & histogram if inverse transform was available
+    if pred_phys_df is not None:
+        plot_parity(
+            pred_phys_df[f"{base0}_true"].values,
+            pred_phys_df[f"{base0}_pred"].values,
+            f"figures/parity_{base0.lower()}_physical_test.png",
+            title=f"Parity {base0} (physical units)"
+        )
+        plot_residual_hist(
+            pred_phys_df[f"{base0}_true"].values - pred_phys_df[f"{base0}_pred"].values,
+            f"figures/resid_hist_{base0.lower()}_physical_test.png",
+            title=f"Residual Histogram {base0} (physical units)"
+        )
 
     print("Wrote:")
     print(f" - {out_csv}")
     print(" - figures/overlay_test_residuals.png")
-    print(f" - figures/parity_{base0.lower()}_test.png")
-    print(f" - figures/resid_hist_{base0.lower()}_test.png")
+    print(f" - figures/parity_{base0.lower()}_scaled_test.png")
+    print(f" - figures/resid_hist_{base0.lower()}_scaled_test.png")
+    if pred_phys_df is not None:
+        print(f" - figures/parity_{base0.lower()}_physical_test.png")
+        print(f" - figures/resid_hist_{base0.lower()}_physical_test.png")
+        
+        # Write a diagnostics summary file
+    diag_path = f"figures/diagnostics_{base0.lower()}.txt"
+    with open(diag_path, "w", encoding="utf-8") as f:
+        f.write("=== Evaluation Diagnostics ===\n")
+        f.write(f"model_type: {cfg.model_type}\n")
+        f.write(f"target_cols: {cfg.target_cols}\n")
+        f.write(f"resolved_target_cols: {targ_cols}\n")
+        f.write(f"resolved_feature_cols: {feat_cols}\n")
+        f.write(f"window_s: {cfg.window_s}\n")
+        f.write(f"target_hz: {cfg.target_hz}\n")
+        f.write(f"stride_steps: {cfg.stride_steps}\n")
+        f.write(f"use_physics_baseline: {getattr(cfg, 'use_physics_baseline', None)}\n")
+        f.write(f"target_mode: {getattr(cfg, 'target_mode', 'direct')}\n")
+        f.write("\n=== Overall MAE (scaled space) ===\n")
+        f.write(str(overall_mae) + "\n")
+        f.write("\n=== Prediction summary (scaled space) ===\n")
+        f.write(pred_df.describe().to_string() + "\n")
 
+        if pred_phys_df is not None:
+            f.write("\n=== Prediction summary (physical space) ===\n")
+            f.write(pred_phys_df.describe().to_string() + "\n")
+
+        f.write("\n=== Aligned feature summary ===\n")
+        cols_present = [c for c in feat_cols if c in aligned.columns]
+        if cols_present:
+            f.write(aligned[cols_present].describe().T.to_string() + "\n")
+            f.write("\n=== Feature unique counts ===\n")
+            f.write(aligned[cols_present].nunique().to_string() + "\n")
+
+    print(f" - {diag_path}")
     # --- Optional: Hybrid overlays in PHYSICAL units (physics + residual) ---
     # Works only if physics baseline columns were added by prepare_frames()
     # and copied into pred_df by _predict_df(..., test_df_for_phys=test_df).

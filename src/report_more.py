@@ -20,6 +20,15 @@ def binned_mae(y_true, y_pred, by, nbins, out_png):
     import matplotlib.pyplot as plt
 
     df = pd.DataFrame({"y_true": y_true, "y_pred": y_pred, "by": by})
+    
+    if pd.Series(by).nunique(dropna=True) < 3:
+        plt.figure(figsize=(6, 3))
+        plt.text(0.5, 0.5, "Too few unique values for binned MAE", ha="center", va="center")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(out_png, dpi=150)
+        plt.close()
+        return
     # robust bin edges: fall back to unique-only if distribution is degenerate
     q = np.linspace(0, 1, nbins + 1)
     edges = np.unique(np.quantile(df["by"].to_numpy(float), q))
