@@ -18,6 +18,10 @@ def binned_mae(y_true, y_pred, by, nbins, out_png):
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
+    n = len(np.asarray(y_true).ravel())
+    if n == 0:
+        return
+    window = min(window, max(5, n // 5))
 
     df = pd.DataFrame({"y_true": y_true, "y_pred": y_pred, "by": by})
     
@@ -204,6 +208,119 @@ def plot_error_acf_panel(aligned_df, pred_df, out_png, target_short="PM2_5", max
     fig.savefig(out_png, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+
+
+def plot_target_acf(aligned_df, out_png, target_short="P_VA", max_lag=100):
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    truth_candidates = [f"{target_short}_ug_per_m3", target_short]
+    truth_col = next((c for c in truth_candidates if c in aligned_df.columns), None)
+    if truth_col is None:
+        raise ValueError(f"Could not find truth column for {target_short}")
+
+    y = aligned_df[truth_col].to_numpy(dtype=float)
+    y = y - np.nanmean(y)
+    y = np.nan_to_num(y, nan=0.0)
+
+    L = int(min(max_lag, len(y) - 2))
+    denom = float(np.dot(y, y))
+    if denom <= 0:
+        denom = 1.0
+
+    acf = np.empty(L + 1, dtype=float)
+    acf[0] = 1.0
+    for k in range(1, L + 1):
+        acf[k] = float(np.dot(y[:-k], y[k:]) / denom)
+
+    lags = np.arange(L + 1)
+    ci = 1.96 / np.sqrt(len(y))
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(lags, acf, label="ACF: target")
+    ax.axhline(ci, linestyle="--", linewidth=1.0)
+    ax.axhline(-ci, linestyle="--", linewidth=1.0)
+    ax.set_xlabel("Lag")
+    ax.set_ylabel("Autocorrelation")
+    ax.set_title(f"Target ACF — {target_short}")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+def plot_target_physics_hybrid_acf(aligned_df, pred_df, out_png, target_short="P_VA", max_lag=100):
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    truth_candidates = [f"{target_short}_ug_per_m3", target_short]
+    truth_col = next((c for c in truth_candidates if c in aligned_df.columns), None)
+    if truth_col is None:
+        raise ValueError(f"Could not find truth column for {target_short}")
+
+    y = aligned_df[truth_col].to_numpy(dtype=float)
+    pred_col = f"{target_short}_pred"
+    if pred_col not in pred_df.columns:
+        raise ValueError(f"Missing {pred_col} in pred_df")
+
+    n = min(len(y), len(pred_df))
+    y = y[:n]
+    yhat = pred_df[pred_col].to_numpy(dtype=float)[:n]
+
+    phys_col = f"{target_short}_phys"
+    has_phys = phys_col in aligned_df.columns
+
+    if has_phys:
+        y_phys = aligned_df[phys_col].to_numpy(dtype=float)[:n]
+        e_phys = y - y_phys
+        e_hyb = y - (y_phys + yhat)
+    else:
+        e_phys = None
+        e_hyb = y - yhat
+
+    def _acf(x, max_lag):
+        x = np.asarray(x, dtype=float)
+        x = x - np.nanmean(x)
+        x = np.nan_to_num(x, nan=0.0)
+        L = int(min(max_lag, len(x) - 2))
+        denom = float(np.dot(x, x))
+        if denom <= 0:
+            denom = 1.0
+        out = np.empty(L + 1, dtype=float)
+        out[0] = 1.0
+        for k in range(1, L + 1):
+            out[k] = float(np.dot(x[:-k], x[k:]) / denom)
+        return out
+
+    a_y = _acf(y, max_lag)
+    a_h = _acf(e_hyb, max_lag)
+    L = min(len(a_y), len(a_h)) - 1
+    lags = np.arange(L + 1)
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(lags, a_y[:L+1], label="ACF: target")
+
+    if e_phys is not None:
+        a_p = _acf(e_phys, max_lag)
+        L = min(L, len(a_p) - 1)
+        lags = np.arange(L + 1)
+        ax.plot(lags, a_p[:L+1], label="ACF: physics error")
+        ax.plot(lags, a_h[:L+1], label="ACF: hybrid error")
+    else:
+        ax.plot(lags, a_h[:L+1], label="ACF: model error")
+
+    ci = 1.96 / np.sqrt(n)
+    ax.axhline(ci, linestyle="--", linewidth=1.0)
+    ax.axhline(-ci, linestyle="--", linewidth=1.0)
+
+    ax.set_xlabel("Lag")
+    ax.set_ylabel("Autocorrelation")
+    ax.set_title(f"ACF comparison — {target_short}")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close(fig)    
 # 3) Rolling MAE over time
 # -----------------------------
 def rolling_mae(y_true, y_pred, window, out_png):

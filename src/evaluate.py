@@ -169,7 +169,12 @@ def main():
     # Align regime flags with predictions using window end indices
     end_idxs = [e - 1 for (s, e) in test_ds.indices]
     aligned = test_df.iloc[end_idxs].reset_index(drop=True).copy()
-    from src.report_more import residual_autocorr, plot_error_acf_panel
+    from src.report_more import (
+        residual_autocorr,
+        plot_error_acf_panel,
+        plot_target_acf,
+        plot_target_physics_hybrid_acf,
+    )
 
 
     # pick the first target from config (works for single-target P_VA too)
@@ -246,7 +251,7 @@ def main():
     if pred_phys_df is not None:
         print(f" - figures/parity_{base0.lower()}_physical_test.png")
         print(f" - figures/resid_hist_{base0.lower()}_physical_test.png")
-        
+
         # Write a diagnostics summary file
     diag_path = f"figures/diagnostics_{base0.lower()}.txt"
     with open(diag_path, "w", encoding="utf-8") as f:
