@@ -124,10 +124,12 @@ def main():
     # even though the model is trained on residual columns (targs)
     display_names = cfg.target_cols  # keep PM10/PM2_5/PM1 naming for plots
 
-    # Predict in residual space; if physics columns present in test_df, also make hybrid columns
-    # Physics columns exist iff cfg.use_physics_baseline=True and your prepare_frames added *_phys.
     pred_df = _predict_df(model, test_ds, device, display_names, test_df_for_phys=test_df)
-        # Inverse-transform predictions back to physical target space when possible
+    if pred_df.empty:
+        print("No test windows; nothing to evaluate.")
+        return
+
+    # Inverse-transform predictions back to physical target space when possible
     target_scaler = splits.get("_target_scaler", None)
     pred_phys_df = None
 
@@ -150,9 +152,6 @@ def main():
 
         print(f"Test MAE ({base0}, physical units):", mae_phys)
         print(f"Test RMSE ({base0}, physical units):", rmse_phys)
-    if pred_df.empty:
-        print("No test windows; nothing to evaluate.")
-        return
 
     # Save predictions
     out_csv = "data/processed/test_predictions_residuals.csv"
@@ -169,6 +168,11 @@ def main():
     # Align regime flags with predictions using window end indices
     end_idxs = [e - 1 for (s, e) in test_ds.indices]
     aligned = test_df.iloc[end_idxs].reset_index(drop=True).copy()
+    
+
+
+
+
     from src.report_more import (
         residual_autocorr,
         plot_error_acf_panel,
@@ -188,7 +192,26 @@ def main():
         max_lag=200,
         title=f"Residual-space error ACF ({base0})"
     )
+    try:
+        plot_target_acf(
+            aligned_df=aligned,
+            out_png=f"figures/fig_acf_target_{base0.lower()}.png",
+            target_short=base0,
+            max_lag=100,
+        )
+    except Exception as e:
+        print(f"[evaluate] Skipped target ACF: {e}")
 
+    try:
+        plot_target_physics_hybrid_acf(
+            aligned_df=aligned,
+            pred_df=pred_df,
+            out_png=f"figures/fig_acf_trio_{base0.lower()}.png",
+            target_short=base0,
+            max_lag=100,
+        )
+    except Exception as e:
+        print(f"[evaluate] Skipped trio ACF plot: {e}")
     # Physics-only vs hybrid error ACF (only if physics columns exist)
     try:
         plot_error_acf_panel(
