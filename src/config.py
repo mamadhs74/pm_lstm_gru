@@ -13,7 +13,7 @@ class Config:
     # ---- sampling & windowing ----
     orig_hz: int = 10
     target_hz: int = 5
-    window_s: int = 20           # 200 steps @5 Hz
+    window_s: int = 10           # 200 steps @5 Hz
     target_shift_s: int = 15     # predict t+20 s
     stride_steps: int = 1        # 1 s stride @5 Hz
 
@@ -123,7 +123,7 @@ class Config:
     # ===== physics-baseline options =====
     physics_ma_window: int = 5
     grade_smooth_window: int = 9
-    use_physics_baseline: bool = False  # train on (PM - PF * W_spec)
+    use_physics_baseline: bool = True  # train on (PM - PF * W_spec)
 
     # (optional) dynamic front share using simple longitudinal weight transfer
     use_dynamic_brake_share: bool = True   # set True to enable
