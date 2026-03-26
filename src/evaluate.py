@@ -1,13 +1,12 @@
-# src/evaluate.py
 import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 from src.config import cfg, resolved_feature_cols, resolved_target_cols
 from src.preprocess import prepare_frames
 from src.datasets import WindowedDataset
-# top of file: add TCNRegressor to the import
 from src.models import RNNRegressor, TCNRegressor
 from src.visualize import plot_overlay, plot_parity, plot_residual_hist
 from src.diagnostics import regime_metrics
@@ -34,7 +33,6 @@ def _predict_df(model, ds, device, display_names, test_df_for_phys=None):
             yp = yp[0]
         truths.append(yb.detach().cpu().numpy())
         preds.append(yp.detach().cpu().numpy())
-
 
     if not truths:
         return pd.DataFrame()
@@ -82,13 +80,11 @@ def main():
     print("cfg.target_cols:", cfg.target_cols)
     print("resolved_target_cols(cfg):", targ_cols)
     assert len(targ_cols) == len(cfg.target_cols)
-    
-
 
     test_df = splits["test"].reset_index(drop=True)
     test_ds = WindowedDataset(test_df, feat_cols, targ_cols, window, stride)
 
-        # --- Build the model that matches cfg.model_type and load its checkpoint ---
+    # --- Build the model that matches cfg.model_type and load its checkpoint ---
     feats = resolved_feature_cols(cfg)
     targs = resolved_target_cols(cfg)
 
@@ -118,7 +114,6 @@ def main():
     ckpt = f".runs/{cfg.model_type}_best.pt"   # e.g., .runs/tcn_best.pt
     model.load_state_dict(torch.load(ckpt, map_location=device))
     model.eval()
-
 
     # Decide the human-friendly display order (corresponds to cfg.target_cols)
     # even though the model is trained on residual columns (targs)
@@ -168,10 +163,11 @@ def main():
     # Align regime flags with predictions using window end indices
     end_idxs = [e - 1 for (s, e) in test_ds.indices]
     aligned = test_df.iloc[end_idxs].reset_index(drop=True).copy()
-    
-
-
-
+    t0 = cfg.target_cols[0]
+    base0 = _base_name(t0)
+    if f"{base0}_phys" in pred_df.columns:
+        phys_abs = np.abs(pred_df[f"{base0}_phys"].to_numpy())
+        print(f"[check] {base0}_phys mean abs =", float(np.mean(phys_abs)))
 
     from src.report_more import (
         residual_autocorr,
@@ -180,11 +176,6 @@ def main():
         plot_target_physics_hybrid_acf,
     )
 
-
-    # pick the first target from config (works for single-target P_VA too)
-    t0 = cfg.target_cols[0]
-    base0 = _base_name(t0)
-
     # Residual-space error ACF (always valid)
     residual_autocorr(
         pred_df[f"{base0}_true"].to_numpy() - pred_df[f"{base0}_pred"].to_numpy(),
@@ -192,6 +183,7 @@ def main():
         max_lag=200,
         title=f"Residual-space error ACF ({base0})"
     )
+    
     try:
         plot_target_acf(
             aligned_df=aligned,
@@ -212,6 +204,7 @@ def main():
         )
     except Exception as e:
         print(f"[evaluate] Skipped trio ACF plot: {e}")
+
     # Physics-only vs hybrid error ACF (only if physics columns exist)
     try:
         plot_error_acf_panel(
@@ -229,14 +222,13 @@ def main():
     if "idle" not in aligned.columns:
         aligned["idle"] = 0
     if "cruise" not in aligned.columns:
-        aligned["cruise"] = ((aligned["idle"].astype(int) == 0) &
+        aligned["cruise"] = ((aligned["idle"].astype(int) == 0) & 
                              (aligned["brake"].astype(int) == 0)).astype(int)
 
     merged = pd.concat([aligned, pred_df.reset_index(drop=True)], axis=1)
     print("Regime metrics:", regime_metrics(merged))
 
     # --- Plots (residual space) ---
-    # Your overlay expects columns {PM*_true, PM*_pred}
     plot_overlay(pred_df, "figures/overlay_test_residuals.png", title="Test — residuals (true vs pred)")
 
     # Scaled-space parity & histogram
@@ -275,7 +267,7 @@ def main():
         print(f" - figures/parity_{base0.lower()}_physical_test.png")
         print(f" - figures/resid_hist_{base0.lower()}_physical_test.png")
 
-        # Write a diagnostics summary file
+    # Write a diagnostics summary file
     diag_path = f"figures/diagnostics_{base0.lower()}.txt"
     with open(diag_path, "w", encoding="utf-8") as f:
         f.write("=== Evaluation Diagnostics ===\n")
@@ -306,11 +298,9 @@ def main():
 
     print(f" - {diag_path}")
     # --- Optional: Hybrid overlays in PHYSICAL units (physics + residual) ---
-    # Works only if physics baseline columns were added by prepare_frames()
-    # and copied into pred_df by _predict_df(..., test_df_for_phys=test_df).
     if any(f"{_base_name(t)}_phys" in pred_df.columns for t in display_names):
         for t in display_names:
-            base = _base_name(t)  # "PM10", "PM2_5", "PM1"
+            base = _base_name(t)
             phys_col = f"{base}_phys"
             if phys_col in pred_df.columns:
                 y_phys = pred_df[phys_col].to_numpy(dtype=float)
@@ -321,8 +311,3 @@ def main():
                 out_png = f"figures/overlay_test_{base.lower()}_hybrid.png"
                 plot_overlay(df_hybrid, out_png, title=f"Test — {base} total (hybrid vs truth)")
                 print(f" - {out_png}")
-
-
-
-if __name__ == "__main__":
-    main()
