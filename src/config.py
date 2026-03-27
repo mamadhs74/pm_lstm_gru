@@ -9,7 +9,7 @@ class Config:
     data_path: str = "data/processed/1_clean_decimal_fixed.csv"
     processed_dir: str = "data/processed"
     seed: int = 42
-    target_mode: str = "direct"   # "direct" | "residual_shift" | "physics_residual_shift"
+    target_mode: str = "physics_residual_shift"   # "direct" | "residual_shift" | "physics_residual_shift"
     # ---- sampling & windowing ----
     orig_hz: int = 10
     target_hz: int = 5

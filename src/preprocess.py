@@ -137,52 +137,60 @@ def shift_ema_targets(df: pd.DataFrame, cfg):
 def shift_phys_targets(df: pd.DataFrame, cfg):
     shift_steps = int(cfg.target_shift_s * cfg.target_hz)
     out = df.copy()
+
     for col in cfg.target_cols:
+        short = col.split("_ug")[0] if "_ug" in col else col
         rc = f"{col}_resid_phys"
+        pc = f"{short}_phys"
+
         out[f"{rc}_shift"] = out[rc].shift(-shift_steps)
+        out[f"{pc}_shift"] = out[pc].shift(-shift_steps)
+        out[f"{col}_shift"] = out[col].shift(-shift_steps)
+
     if shift_steps > 0:
         out = out.iloc[:-shift_steps]
-    return out.reset_index(drop=True)
 
+    return out.reset_index(drop=True)
+    
 def prepare_frames(df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-    # 0) NEW: normalize units and create canonical columns our pipeline expects
+    # 0) normalize units and create canonical columns
     df = canonicalize_units_and_names(df, cfg)
-    # 1) resample + regimes
+
+    # 1) resample + regime features
     df = downsample(df, cfg.orig_hz, cfg.target_hz)
     df = add_regime_features(df)
 
-    # 2) split
+    # 2) split first, but DO NOT scale before physics
     splits = leak_free_split(df, cfg)
 
-    # 3) scale features (fit on train only)
-    scaler = fit_transformers(splits["train"], cfg)
-    for k in ("train", "val", "test"):
-        splits[k] = apply_transformers(splits[k], scaler, cfg)
-
-    # 4) EMA residuals (optional baseline)
+    # 3) build EMA residual targets on raw physical values
     for k in ("train", "val", "test"):
         splits[k] = build_residual_targets(splits[k], cfg)
         splits[k] = shift_ema_targets(splits[k], cfg)
 
-    # 5) physics-guided residuals (recommended)
+    # 4) build physics baseline on unscaled physical features
     if getattr(cfg, "use_physics_baseline", False):
-        splits = build_physics_residuals(splits)       # adds *_phys and *_resid_phys
+        splits = build_physics_residuals(splits)
         for k in ("train", "val", "test"):
             splits[k] = shift_phys_targets(splits[k], cfg)
 
-        # 6) === NEW: scale the final target columns actually fed to the model ===
-    from .config import resolved_target_cols
-    targ_cols = resolved_target_cols(cfg)  # e.g. ["PM10_ug_per_m3_resid_shift", ...]
+    # 5) NOW scale features
+    scaler = fit_transformers(splits["train"], cfg)
+    for k in ("train", "val", "test"):
+        if len(splits[k]) > 0:
+            splits[k] = apply_transformers(splits[k], scaler, cfg)
 
-    t_scaler = fit_target_scaler(splits["train"], targ_cols)  # fit on TRAIN only
+    # 6) scale target columns actually fed to model
+    from .config import resolved_target_cols
+    targ_cols = resolved_target_cols(cfg)
+
+    t_scaler = fit_target_scaler(splits["train"], targ_cols)
     for k in ("train", "val", "test"):
         if len(splits[k]) > 0:
             splits[k] = apply_target_scaler(splits[k], targ_cols, t_scaler)
 
-    # optionally stash for later (not required)
     splits["_target_scaler"] = t_scaler
 
-    # === NEW: save scalers for inference (feature + target) ===
     runs_dir = Path(".runs")
     runs_dir.mkdir(exist_ok=True)
 

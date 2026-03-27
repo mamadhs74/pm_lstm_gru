@@ -4,7 +4,7 @@ import pandas as pd
 from typing import Dict, Tuple
 
 def _ma(x: np.ndarray, k: int) -> np.ndarray:
-    return pd.Series(x).rolling(k, min_periods=1, center=True).mean().to_numpy()
+    return pd.Series(x).rolling(k, min_periods=1, center=False).mean().to_numpy()
 
 def _grad(y: np.ndarray, x: np.ndarray) -> np.ndarray:
     return np.gradient(y, x, edge_order=1)

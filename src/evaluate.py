@@ -3,7 +3,6 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-
 from src.config import cfg, resolved_feature_cols, resolved_target_cols
 from src.preprocess import prepare_frames
 from src.datasets import WindowedDataset
@@ -128,7 +127,9 @@ def main():
         print("No test windows; nothing to evaluate.")
         return
 
-    # --- inverse transform to physical units if available ---
+    # Inverse-transform model target back to physical units
+    # For physics_residual_shift mode, this is the residual first,
+    # then we reconstruct total prediction using shifted physics baseline.
     target_scaler = splits.get("_target_scaler", None)
     pred_phys_df = None
 
@@ -139,19 +140,43 @@ def main():
         y_true_scaled = pred_df[f"{base0}_true"].to_numpy().reshape(-1, 1)
         y_pred_scaled = pred_df[f"{base0}_pred"].to_numpy().reshape(-1, 1)
 
-        y_true_phys = target_scaler.inverse_transform(y_true_scaled).ravel()
-        y_pred_phys = target_scaler.inverse_transform(y_pred_scaled).ravel()
+        y_true_resid = target_scaler.inverse_transform(y_true_scaled).ravel()
+        y_pred_resid = target_scaler.inverse_transform(y_pred_scaled).ravel()
 
         pred_phys_df = pd.DataFrame({
-            f"{base0}_true": y_true_phys,
-            f"{base0}_pred": y_pred_phys,
+            f"{base0}_true_resid": y_true_resid,
+            f"{base0}_pred_resid": y_pred_resid,
         })
 
-        mae_phys = float(np.mean(np.abs(y_true_phys - y_pred_phys)))
-        rmse_phys = float(np.sqrt(np.mean((y_true_phys - y_pred_phys) ** 2)))
+        end_idxs = [e - 1 for (s, e) in test_ds.indices]
 
-        print(f"Test MAE ({base0}, physical units):", mae_phys)
-        print(f"Test RMSE ({base0}, physical units):", rmse_phys)
+        phys_shift_col = f"{base0}_phys_shift"
+        true_shift_col = f"{t0}_shift"
+
+        if phys_shift_col in test_df.columns and true_shift_col in test_df.columns:
+            y_phys = test_df.iloc[end_idxs][phys_shift_col].to_numpy(dtype=float)
+            y_true_total = test_df.iloc[end_idxs][true_shift_col].to_numpy(dtype=float)
+            y_pred_total = y_phys + y_pred_resid
+
+            pred_phys_df[f"{base0}_phys"] = y_phys
+            pred_phys_df[f"{base0}_true"] = y_true_total
+            pred_phys_df[f"{base0}_pred"] = y_pred_total
+
+            mae_phys = float(np.mean(np.abs(y_true_total - y_pred_total)))
+            rmse_phys = float(np.sqrt(np.mean((y_true_total - y_pred_total) ** 2)))
+
+            print(f"Test MAE ({base0}, physical hybrid units):", mae_phys)
+            print(f"Test RMSE ({base0}, physical hybrid units):", rmse_phys)
+        else:
+            # fallback if physics columns are unavailable
+            pred_phys_df[f"{base0}_true"] = y_true_resid
+            pred_phys_df[f"{base0}_pred"] = y_pred_resid
+
+            mae_phys = float(np.mean(np.abs(y_true_resid - y_pred_resid)))
+            rmse_phys = float(np.sqrt(np.mean((y_true_resid - y_pred_resid) ** 2)))
+
+            print(f"Test MAE ({base0}, fallback physical units):", mae_phys)
+            print(f"Test RMSE ({base0}, fallback physical units):", rmse_phys)
 
     # --- save raw predictions ---
     out_csv = "data/processed/test_predictions_residuals.csv"
@@ -369,6 +394,54 @@ def main():
                 plot_overlay(df_hybrid, out_png, title=f"Test — {base} total (hybrid vs truth)")
                 print(f" - {out_png}")
 
+        # =========================
+    # FINAL REPORT METRICS
+    # =========================
+
+    if pred_phys_df is not None:
+        y_true_eval = pred_phys_df[f"{base0}_true"].to_numpy()
+        y_pred_eval = pred_phys_df[f"{base0}_pred"].to_numpy()
+        space = "physical"
+    else:
+        y_true_eval = pred_df[f"{base0}_true"].to_numpy()
+        y_pred_eval = pred_df[f"{base0}_pred"].to_numpy()
+        space = "scaled"
+
+    # --- metrics ---
+    mae = mean_absolute_error(y_true_eval, y_pred_eval)
+    rmse = np.sqrt(mean_squared_error(y_true_eval, y_pred_eval))
+    r2 = r2_score(y_true_eval, y_pred_eval)
+
+    # --- NRMSE ---
+    y_range = np.max(y_true_eval) - np.min(y_true_eval)
+    nrmse = rmse / y_range if y_range > 0 else np.nan
+
+    # --- Bias ---
+    bias = np.mean(y_pred_eval - y_true_eval)
+
+    print("\n=== FINAL REPORT METRICS ===")
+    print("Space:", space)
+    print("MAE:", mae)
+    print("RMSE:", rmse)
+    print("R2:", r2)
+    print("NRMSE:", nrmse)
+    print("Bias:", bias)
+
+    # --- SAVE TO CSV ---
+    metrics_df = pd.DataFrame([{
+        "target": base0,
+        "space": space,
+        "MAE": mae,
+        "RMSE": rmse,
+        "R2": r2,
+        "NRMSE": nrmse,
+        "Bias": bias,
+        "N": len(y_true_eval)
+    }])
+
+    metrics_path = f"data/processed/metrics_{base0.lower()}.csv"
+    metrics_df.to_csv(metrics_path, index=False)
+    print("Saved metrics ->", metrics_path)
 
 if __name__ == "__main__":
     main()
