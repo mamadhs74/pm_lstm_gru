@@ -171,7 +171,7 @@ def main():
             # reconstruct from EMA baseline (residual_shift mode)
             end_idxs = [e - 1 for (s, e) in test_ds.indices]
 
-            ema_col = f"{base0}_ema_shift"
+            ema_col = f"{t0}_ema120_shift"
             true_col = f"{t0}_shift"
 
             if ema_col in test_df.columns and true_col in test_df.columns:

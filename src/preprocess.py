@@ -128,10 +128,18 @@ def build_residual_targets(df: pd.DataFrame, cfg):
 def shift_ema_targets(df: pd.DataFrame, cfg):
     shift_steps = int(cfg.target_shift_s * cfg.target_hz)
     out = df.copy()
+
     for col in cfg.target_cols:
-        out[f"{col}_resid_shift"] = out[f"{col}_resid"].shift(-shift_steps)
+        ema_col = f"{col}_ema120"
+        resid_col = f"{col}_resid"
+
+        out[f"{col}_shift"] = out[col].shift(-shift_steps)
+        out[f"{ema_col}_shift"] = out[ema_col].shift(-shift_steps)
+        out[f"{resid_col}_shift"] = out[resid_col].shift(-shift_steps)
+
     if shift_steps > 0:
         out = out.iloc[:-shift_steps]
+
     return out.reset_index(drop=True)
 
 def shift_phys_targets(df: pd.DataFrame, cfg):
