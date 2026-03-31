@@ -168,9 +168,27 @@ def main():
             print(f"Test MAE ({base0}, physical hybrid units):", mae_phys)
             print(f"Test RMSE ({base0}, physical hybrid units):", rmse_phys)
         else:
-            # fallback if physics columns are unavailable
-            pred_phys_df[f"{base0}_true"] = y_true_resid
-            pred_phys_df[f"{base0}_pred"] = y_pred_resid
+            # reconstruct from EMA baseline (residual_shift mode)
+            end_idxs = [e - 1 for (s, e) in test_ds.indices]
+
+            ema_col = f"{base0}_ema_shift"
+            true_col = f"{t0}_shift"
+
+            if ema_col in test_df.columns and true_col in test_df.columns:
+                y_ema = test_df.iloc[end_idxs][ema_col].to_numpy(dtype=float)
+                y_true_total = test_df.iloc[end_idxs][true_col].to_numpy(dtype=float)
+                y_pred_total = y_ema + y_pred_resid
+
+                pred_phys_df[f"{base0}_true"] = y_true_total
+                pred_phys_df[f"{base0}_pred"] = y_pred_total
+
+                mae_phys = float(np.mean(np.abs(y_true_total - y_pred_total)))
+                rmse_phys = float(np.sqrt(np.mean((y_true_total - y_pred_total) ** 2)))
+
+                print(f"Test MAE ({base0}, EMA hybrid units):", mae_phys)
+                print(f"Test RMSE ({base0}, EMA hybrid units):", rmse_phys)
+            else:
+                print("ERROR: EMA baseline missing, cannot reconstruct physical signal")
 
             mae_phys = float(np.mean(np.abs(y_true_resid - y_pred_resid)))
             rmse_phys = float(np.sqrt(np.mean((y_true_resid - y_pred_resid) ** 2)))
