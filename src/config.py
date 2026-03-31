@@ -13,9 +13,9 @@ class Config:
     # ---- sampling & windowing ----
     orig_hz: int = 10
     target_hz: int = 5
-    window_s: int = 10           # 200 steps @5 Hz
-    target_shift_s: int = 15     # predict t+20 s
-    stride_steps: int = 1        # 1 s stride @5 Hz
+    window_s: int = 20         
+    target_shift_s: int = 1     # predict t+20 s
+    stride_steps: int = 5     
 
         # ---- CV / splitting ----
     n_folds: int = 5
@@ -30,7 +30,6 @@ class Config:
         "yaw_deg_s",
         "acc_lat_ms2",
         "steer_rate_deg_s",
-        "ambient_temp_c",
         "wheel_fl_kmh",
         "wheel_fr_kmh",
         "wheel_rl_kmh",
@@ -43,10 +42,10 @@ class Config:
 
      # ---- model ----
     model_type: str = "tcn"              # "lstm", "gru", or "tcn"
-    dropout: float = 0.30
+    dropout: float = 0.15
 
     # ---- TCN-specific ----
-    tcn_channels = (64, 64, 64, 64, 64, 64)   # deeper stack for ~40–90 s receptive field
+    tcn_channels = (64, 64, 64, 64)   # deeper stack for ~40–90 s receptive field
     tcn_kernel_size: int = 3
 
     # ---- training ----
