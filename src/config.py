@@ -9,7 +9,7 @@ class Config:
     data_path: str = "data/processed/1_clean_decimal_fixed.csv"
     processed_dir: str = "data/processed"
     seed: int = 42
-    target_mode: str = "physics_residual_shift"   # "direct" | "residual_shift" | "physics_residual_shift"
+    target_mode: str = "residual_shift"   # "direct" | "residual_shift" | "physics_residual_shift"
     # ---- sampling & windowing ----
     orig_hz: int = 10
     target_hz: int = 5
@@ -123,7 +123,7 @@ class Config:
     # ===== physics-baseline options =====
     physics_ma_window: int = 5
     grade_smooth_window: int = 9
-    use_physics_baseline: bool = True  # train on (PM - PF * W_spec)
+    use_physics_baseline: bool = False  # train on (PM - PF * W_spec)
 
     # (optional) dynamic front share using simple longitudinal weight transfer
     use_dynamic_brake_share: bool = True   # set True to enable
