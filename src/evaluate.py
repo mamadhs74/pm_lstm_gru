@@ -179,7 +179,7 @@ def main():
                 y_ema = test_df.iloc[end_idxs][ema_col].to_numpy(dtype=float)
                 y_true_total = test_df.iloc[end_idxs][true_col].to_numpy(dtype=float)
 
-                y_pred_total = y_ema * (1.0 + y_pred_resid)
+                y_pred_total = y_ema + y_pred_resid
                 baseline_pred_total = y_ema
 
                 baseline_mae = float(np.mean(np.abs(y_true_total - baseline_pred_total)))
