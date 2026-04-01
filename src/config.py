@@ -24,15 +24,19 @@ class Config:
 
     # ---- feature/target columns (clean CSV names) ----
     feature_cols = [
-        "speed_kmh",
-        "acc_long_ms2",
-        "acc_lat_ms2",
-        "steer_rate_deg_s",
-        "wheel_fl_kmh",
-        "wheel_fr_kmh",
-        "wheel_rl_kmh",
-        "wheel_rr_kmh",
-        
+    "speed_kmh",
+    "acc_long_ms2",
+    "acc_lat_ms2",
+    "steer_rate_deg_s",
+    "yaw_deg_s",
+    "wheel_fl_kmh",
+    "wheel_fr_kmh",
+    "wheel_rl_kmh",
+    "wheel_rr_kmh",
+    "dv",
+    "jerk",
+    "acc_long_ema",
+    "load_transfer_proxy",
     ]
 
     target_cols = ["P_VA"]
@@ -40,7 +44,7 @@ class Config:
 
      # ---- model ----
     model_type: str = "tcn"              # "lstm", "gru", or "tcn"
-    dropout: float = 0.15
+    dropout: float = 0.05
 
     # ---- TCN-specific ----
     tcn_channels = (64, 64, 64, 64)   # deeper stack for ~40–90 s receptive field
