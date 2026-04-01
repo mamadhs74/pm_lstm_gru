@@ -133,12 +133,10 @@ def shift_ema_targets(df: pd.DataFrame, cfg):
     out = df.copy()
 
     for col in cfg.target_cols:
-        log_col = f"{col}_log1p"
         ema_col = f"{col}_ema120"
         resid_col = f"{col}_resid"
 
         out[f"{col}_shift"] = out[col].shift(-shift_steps)
-        out[f"{log_col}_shift"] = out[log_col].shift(-shift_steps)
         out[f"{ema_col}_shift"] = out[ema_col].shift(-shift_steps)
         out[f"{resid_col}_shift"] = out[resid_col].shift(-shift_steps)
 
