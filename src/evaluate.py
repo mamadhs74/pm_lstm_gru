@@ -3,28 +3,28 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import matplotlib.pyplot as plt
+
 from src.config import cfg, resolved_feature_cols, resolved_target_cols
 from src.preprocess import prepare_frames
 from src.datasets import WindowedDataset
 from src.models import RNNRegressor, TCNRegressor
 from src.visualize import plot_overlay, plot_parity, plot_residual_hist
 from src.diagnostics import regime_metrics
+from src.report_more import (
+    residual_autocorr,
+    plot_error_acf_panel,
+    plot_target_acf,
+    plot_target_physics_hybrid_acf,
+)
 
 
 def _base_name(col: str) -> str:
-    # "PM10_ug_per_m3" -> "PM10", "P_VA" -> "P_VA"
     return col.split("_ug")[0] if "_ug" in col else col
 
 
 @torch.no_grad()
 def _predict_df(model, ds, device, display_names, test_df_for_phys=None):
-    """
-    Returns a DataFrame with columns in model-output space:
-      <target>_true, <target>_pred
-
-    If physics columns exist in test_df_for_phys, also returns:
-      <target>_phys, <target>_pred_total
-    """
     loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, drop_last=False)
     truths, preds = [], []
 
@@ -68,12 +68,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     from pathlib import Path
-    import matplotlib.pyplot as plt
-
     Path("figures").mkdir(parents=True, exist_ok=True)
     Path("data/processed").mkdir(parents=True, exist_ok=True)
 
-    # --- same preprocessing as training ---
     raw = pd.read_csv(cfg.data_path).dropna(subset=cfg.target_cols)
     splits = prepare_frames(raw)
 
@@ -84,12 +81,10 @@ def main():
 
     print("cfg.target_cols:", cfg.target_cols)
     print("resolved_target_cols(cfg):", targ_cols)
-    assert len(targ_cols) == len(cfg.target_cols)
 
     test_df = splits["test"].reset_index(drop=True)
     test_ds = WindowedDataset(test_df, feat_cols, targ_cols, window, stride)
 
-    # --- build model exactly like training ---
     feats = resolved_feature_cols(cfg)
     targs = resolved_target_cols(cfg)
 
@@ -121,20 +116,31 @@ def main():
     model.eval()
 
     display_names = cfg.target_cols
-
     pred_df = _predict_df(model, test_ds, device, display_names, test_df_for_phys=test_df)
+
     if pred_df.empty:
         print("No test windows; nothing to evaluate.")
         return
 
-    # Inverse-transform model target back to physical units
-    # For physics_residual_shift mode, this is the residual first,
-    # then we reconstruct total prediction using shifted physics baseline.
-    target_scaler = splits.get("_target_scaler", None)
-    pred_phys_df = None
+    out_csv = "data/processed/test_predictions_residuals.csv"
+    pred_df.to_csv(out_csv, index=False)
+
+    overall_mae = {
+        _base_name(t): float(np.abs(pred_df[f"{_base_name(t)}_true"] - pred_df[f"{_base_name(t)}_pred"]).mean())
+        for t in display_names
+    }
+    print("Test MAE (residual/model space):", overall_mae)
+
+    end_idxs = [e - 1 for (s, e) in test_ds.indices]
+    aligned = test_df.iloc[end_idxs].reset_index(drop=True).copy()
 
     t0 = cfg.target_cols[0]
     base0 = _base_name(t0)
+
+    target_scaler = splits.get("_target_scaler", None)
+    pred_phys_df = None
+    baseline_mae = np.nan
+    baseline_rmse = np.nan
 
     if target_scaler is not None and len(display_names) == 1:
         y_true_scaled = pred_df[f"{base0}_true"].to_numpy().reshape(-1, 1)
@@ -148,8 +154,6 @@ def main():
             f"{base0}_pred_resid": y_pred_resid,
         })
 
-        end_idxs = [e - 1 for (s, e) in test_ds.indices]
-
         phys_shift_col = f"{base0}_phys_shift"
         true_shift_col = f"{t0}_shift"
 
@@ -162,66 +166,66 @@ def main():
             pred_phys_df[f"{base0}_true"] = y_true_total
             pred_phys_df[f"{base0}_pred"] = y_pred_total
 
-            mae_phys = float(np.mean(np.abs(y_true_total - y_pred_total)))
-            rmse_phys = float(np.sqrt(np.mean((y_true_total - y_pred_total) ** 2)))
+            print(f"Test MAE ({base0}, physical hybrid units):",
+                  float(np.mean(np.abs(y_true_total - y_pred_total))))
+            print(f"Test RMSE ({base0}, physical hybrid units):",
+                  float(np.sqrt(np.mean((y_true_total - y_pred_total) ** 2))))
 
-            print(f"Test MAE ({base0}, physical hybrid units):", mae_phys)
-            print(f"Test RMSE ({base0}, physical hybrid units):", rmse_phys)
         else:
-            # reconstruct from EMA baseline (residual_shift mode)
-            end_idxs = [e - 1 for (s, e) in test_ds.indices]
-
             ema_col = f"{t0}_ema120_shift"
             true_col = f"{t0}_shift"
 
             if ema_col in test_df.columns and true_col in test_df.columns:
                 y_ema_log = test_df.iloc[end_idxs][ema_col].to_numpy(dtype=float)
                 y_true_total = test_df.iloc[end_idxs][true_col].to_numpy(dtype=float)
+
+                baseline_pred_total = np.expm1(y_ema_log)
                 y_pred_log = y_ema_log + y_pred_resid
                 y_pred_total = np.expm1(y_pred_log)
+
+                baseline_mae = float(np.mean(np.abs(y_true_total - baseline_pred_total)))
+                baseline_rmse = float(np.sqrt(np.mean((y_true_total - baseline_pred_total) ** 2)))
+
+                print(f"Baseline MAE ({base0}, EMA only):", baseline_mae)
+                print(f"Baseline RMSE ({base0}, EMA only):", baseline_rmse)
 
                 pred_phys_df[f"{base0}_true"] = y_true_total
                 pred_phys_df[f"{base0}_pred"] = y_pred_total
 
-                mae_phys = float(np.mean(np.abs(y_true_total - y_pred_total)))
-                rmse_phys = float(np.sqrt(np.mean((y_true_total - y_pred_total) ** 2)))
+                print(f"Test MAE ({base0}, EMA hybrid units):",
+                      float(np.mean(np.abs(y_true_total - y_pred_total))))
+                print(f"Test RMSE ({base0}, EMA hybrid units):",
+                      float(np.sqrt(np.mean((y_true_total - y_pred_total) ** 2))))
 
-                print(f"Test MAE ({base0}, EMA hybrid units):", mae_phys)
-                print(f"Test RMSE ({base0}, EMA hybrid units):", rmse_phys)
+                # time-series comparison
+                N = min(300, len(y_true_total))
+                plt.figure(figsize=(10, 4))
+                plt.plot(y_true_total[:N], label="True")
+                plt.plot(baseline_pred_total[:N], label="EMA baseline")
+                plt.plot(y_pred_total[:N], label="TCN prediction")
+                plt.xlabel("Sample")
+                plt.ylabel(base0)
+                plt.title(f"{base0}: True vs EMA baseline vs TCN")
+                plt.legend()
+                plt.tight_layout()
+                plt.savefig(f"figures/timeseries_compare_{base0.lower()}.png", dpi=150)
+                plt.close()
+
             else:
                 print("ERROR: EMA baseline missing, cannot reconstruct physical signal")
 
-            mae_phys = float(np.mean(np.abs(y_true_resid - y_pred_resid)))
-            rmse_phys = float(np.sqrt(np.mean((y_true_resid - y_pred_resid) ** 2)))
+    if "brake" not in aligned.columns and "brake_event" in aligned.columns:
+        aligned["brake"] = aligned["brake_event"].astype(int)
+    if "idle" not in aligned.columns:
+        aligned["idle"] = 0
+    if "cruise" not in aligned.columns:
+        aligned["cruise"] = (
+            (aligned["idle"].astype(int) == 0) &
+            (aligned["brake"].astype(int) == 0)
+        ).astype(int)
 
-            print(f"Test MAE ({base0}, fallback physical units):", mae_phys)
-            print(f"Test RMSE ({base0}, fallback physical units):", rmse_phys)
-
-    # --- save raw predictions ---
-    out_csv = "data/processed/test_predictions_residuals.csv"
-    pred_df.to_csv(out_csv, index=False)
-
-    # --- residual/model-space MAE ---
-    overall_mae = {
-        _base_name(t): float(np.abs(pred_df[f"{_base_name(t)}_true"] - pred_df[f"{_base_name(t)}_pred"]).mean())
-        for t in display_names
-    }
-    print("Test MAE (residual):", overall_mae)
-
-    # --- alignment for diagnostics ---
-    end_idxs = [e - 1 for (s, e) in test_ds.indices]
-    aligned = test_df.iloc[end_idxs].reset_index(drop=True).copy()
-
-    if f"{base0}_phys" in pred_df.columns:
-        phys_abs = np.abs(pred_df[f"{base0}_phys"].to_numpy())
-        print(f"[check] {base0}_phys mean abs =", float(np.mean(phys_abs)))
-
-    from src.report_more import (
-        residual_autocorr,
-        plot_error_acf_panel,
-        plot_target_acf,
-        plot_target_physics_hybrid_acf,
-    )
+    merged = pd.concat([aligned, pred_df.reset_index(drop=True)], axis=1)
+    print("Regime metrics:", regime_metrics(merged))
 
     residual_autocorr(
         pred_df[f"{base0}_true"].to_numpy() - pred_df[f"{base0}_pred"].to_numpy(),
@@ -262,20 +266,6 @@ def main():
     except Exception as e:
         print(f"[evaluate] Skipped error ACF panel (likely missing physics or truth cols): {e}")
 
-    if "brake" not in aligned.columns and "brake_event" in aligned.columns:
-        aligned["brake"] = aligned["brake_event"].astype(int)
-    if "idle" not in aligned.columns:
-        aligned["idle"] = 0
-    if "cruise" not in aligned.columns:
-        aligned["cruise"] = (
-            (aligned["idle"].astype(int) == 0) &
-            (aligned["brake"].astype(int) == 0)
-        ).astype(int)
-
-    merged = pd.concat([aligned, pred_df.reset_index(drop=True)], axis=1)
-    print("Regime metrics:", regime_metrics(merged))
-
-    # --- existing plots ---
     plot_overlay(pred_df, "figures/overlay_test_residuals.png", title="Test — residuals (true vs pred)")
 
     plot_parity(
@@ -290,7 +280,7 @@ def main():
         title=f"Residual Histogram {base0} (scaled)"
     )
 
-    if pred_phys_df is not None:
+    if pred_phys_df is not None and f"{base0}_true" in pred_phys_df.columns and f"{base0}_pred" in pred_phys_df.columns:
         plot_parity(
             pred_phys_df[f"{base0}_true"].values,
             pred_phys_df[f"{base0}_pred"].values,
@@ -303,8 +293,7 @@ def main():
             title=f"Residual Histogram {base0} (physical units)"
         )
 
-    # --- NEW: report metrics + actual-vs-predicted plot ---
-    if pred_phys_df is not None:
+    if pred_phys_df is not None and f"{base0}_true" in pred_phys_df.columns and f"{base0}_pred" in pred_phys_df.columns:
         y_true_eval = pred_phys_df[f"{base0}_true"].to_numpy()
         y_pred_eval = pred_phys_df[f"{base0}_pred"].to_numpy()
         metrics_space = "physical"
@@ -316,21 +305,30 @@ def main():
     mae_eval = float(mean_absolute_error(y_true_eval, y_pred_eval))
     rmse_eval = float(np.sqrt(mean_squared_error(y_true_eval, y_pred_eval)))
     r2_eval = float(r2_score(y_true_eval, y_pred_eval))
-
     y_range = float(np.max(y_true_eval) - np.min(y_true_eval))
     nrmse_eval = float(rmse_eval / y_range) if y_range > 0 else np.nan
     bias_eval = float(np.mean(y_pred_eval - y_true_eval))
 
+    print("\n=== FINAL REPORT METRICS ===")
+    print("Space:", metrics_space)
+    print("MAE:", mae_eval)
+    print("RMSE:", rmse_eval)
+    print("R2:", r2_eval)
+    print("NRMSE:", nrmse_eval)
+    print("Bias:", bias_eval)
+
     metrics_df = pd.DataFrame([{
         "target": base0,
         "space": metrics_space,
-        "MAE": mae_eval,
-        "RMSE": rmse_eval,
-        "NRMSE": nrmse_eval,
-        "R2": r2_eval,
-        "Bias": bias_eval,
-        "N": int(len(y_true_eval)),
+        "model_mae": mae_eval,
+        "model_rmse": rmse_eval,
+        "model_r2": r2_eval,
+        "model_nrmse": nrmse_eval,
+        "model_bias": bias_eval,
+        "baseline_mae": baseline_mae,
+        "baseline_rmse": baseline_rmse,
     }])
+
     metrics_csv = f"data/processed/metrics_{base0.lower()}.csv"
     metrics_df.to_csv(metrics_csv, index=False)
 
@@ -346,23 +344,6 @@ def main():
     actual_pred_png = f"figures/actual_vs_predicted_{base0.lower()}.png"
     plt.savefig(actual_pred_png, dpi=150)
     plt.close()
-
-    print(f"MAE ({metrics_space}):", mae_eval)
-    print(f"RMSE ({metrics_space}):", rmse_eval)
-    print(f"NRMSE ({metrics_space}):", nrmse_eval)
-    print(f"R2 ({metrics_space}):", r2_eval)
-    print(f"Bias ({metrics_space}):", bias_eval)
-
-    print("Wrote:")
-    print(f" - {out_csv}")
-    print(" - figures/overlay_test_residuals.png")
-    print(f" - figures/parity_{base0.lower()}_scaled_test.png")
-    print(f" - figures/resid_hist_{base0.lower()}_scaled_test.png")
-    if pred_phys_df is not None:
-        print(f" - figures/parity_{base0.lower()}_physical_test.png")
-        print(f" - figures/resid_hist_{base0.lower()}_physical_test.png")
-    print(f" - {metrics_csv}")
-    print(f" - {actual_pred_png}")
 
     diag_path = f"figures/diagnostics_{base0.lower()}.txt"
     with open(diag_path, "w", encoding="utf-8") as f:
@@ -382,85 +363,16 @@ def main():
         f.write(metrics_df.to_string(index=False) + "\n")
         f.write("\n=== Prediction summary (scaled/model space) ===\n")
         f.write(pred_df.describe().to_string() + "\n")
-
         if pred_phys_df is not None:
             f.write("\n=== Prediction summary (physical space) ===\n")
             f.write(pred_phys_df.describe().to_string() + "\n")
 
-        f.write("\n=== Aligned feature summary ===\n")
-        cols_present = [c for c in feat_cols if c in aligned.columns]
-        if cols_present:
-            f.write(aligned[cols_present].describe().T.to_string() + "\n")
-            f.write("\n=== Feature unique counts ===\n")
-            f.write(aligned[cols_present].nunique().to_string() + "\n")
-
+    print("Wrote:")
+    print(f" - {out_csv}")
+    print(f" - {metrics_csv}")
+    print(f" - {actual_pred_png}")
     print(f" - {diag_path}")
 
-    if any(f"{_base_name(t)}_phys" in pred_df.columns for t in display_names):
-        for t in display_names:
-            base = _base_name(t)
-            phys_col = f"{base}_phys"
-            if phys_col in pred_df.columns:
-                y_phys = pred_df[phys_col].to_numpy(dtype=float)
-                y_true_tot = y_phys + pred_df[f"{base}_true"].to_numpy(dtype=float)
-                y_pred_tot = y_phys + pred_df[f"{base}_pred"].to_numpy(dtype=float)
-
-                df_hybrid = pd.DataFrame({
-                    f"{base}_true": y_true_tot,
-                    f"{base}_pred": y_pred_tot
-                })
-                out_png = f"figures/overlay_test_{base.lower()}_hybrid.png"
-                plot_overlay(df_hybrid, out_png, title=f"Test — {base} total (hybrid vs truth)")
-                print(f" - {out_png}")
-
-        # =========================
-    # FINAL REPORT METRICS
-    # =========================
-
-    if pred_phys_df is not None:
-        y_true_eval = pred_phys_df[f"{base0}_true"].to_numpy()
-        y_pred_eval = pred_phys_df[f"{base0}_pred"].to_numpy()
-        space = "physical"
-    else:
-        y_true_eval = pred_df[f"{base0}_true"].to_numpy()
-        y_pred_eval = pred_df[f"{base0}_pred"].to_numpy()
-        space = "scaled"
-
-    # --- metrics ---
-    mae = mean_absolute_error(y_true_eval, y_pred_eval)
-    rmse = np.sqrt(mean_squared_error(y_true_eval, y_pred_eval))
-    r2 = r2_score(y_true_eval, y_pred_eval)
-
-    # --- NRMSE ---
-    y_range = np.max(y_true_eval) - np.min(y_true_eval)
-    nrmse = rmse / y_range if y_range > 0 else np.nan
-
-    # --- Bias ---
-    bias = np.mean(y_pred_eval - y_true_eval)
-
-    print("\n=== FINAL REPORT METRICS ===")
-    print("Space:", space)
-    print("MAE:", mae)
-    print("RMSE:", rmse)
-    print("R2:", r2)
-    print("NRMSE:", nrmse)
-    print("Bias:", bias)
-
-    # --- SAVE TO CSV ---
-    metrics_df = pd.DataFrame([{
-        "target": base0,
-        "space": space,
-        "MAE": mae,
-        "RMSE": rmse,
-        "R2": r2,
-        "NRMSE": nrmse,
-        "Bias": bias,
-        "N": len(y_true_eval)
-    }])
-
-    metrics_path = f"data/processed/metrics_{base0.lower()}.csv"
-    metrics_df.to_csv(metrics_path, index=False)
-    print("Saved metrics ->", metrics_path)
 
 if __name__ == "__main__":
     main()
