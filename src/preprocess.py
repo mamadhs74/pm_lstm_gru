@@ -117,12 +117,20 @@ def apply_transformers(df: pd.DataFrame, scaler: RobustScaler, cfg):
     return out
 
 def build_residual_targets(df: pd.DataFrame, cfg):
-    dt = 1.0 / cfg.target_hz; T = 120.0; alpha = dt / (T + dt)
+    dt = 1.0 / cfg.target_hz
+    T = 120.0
+    alpha = dt / (T + dt)
     out = df.copy()
+
     for col in cfg.target_cols:
-        base_col = f"{col}_ema120"
-        out[base_col] = out[col].ewm(alpha=alpha, adjust=False).mean()
-        out[f"{col}_resid"] = out[col] - out[base_col]
+        log_col = f"{col}_log1p"
+        ema_col = f"{col}_ema120"
+        resid_col = f"{col}_resid"
+
+        out[log_col] = np.log1p(out[col].astype(float))
+        out[ema_col] = out[log_col].ewm(alpha=alpha, adjust=False).mean()
+        out[resid_col] = out[log_col] - out[ema_col]
+
     return out
 
 def shift_ema_targets(df: pd.DataFrame, cfg):
@@ -130,10 +138,12 @@ def shift_ema_targets(df: pd.DataFrame, cfg):
     out = df.copy()
 
     for col in cfg.target_cols:
+        log_col = f"{col}_log1p"
         ema_col = f"{col}_ema120"
         resid_col = f"{col}_resid"
 
         out[f"{col}_shift"] = out[col].shift(-shift_steps)
+        out[f"{log_col}_shift"] = out[log_col].shift(-shift_steps)
         out[f"{ema_col}_shift"] = out[ema_col].shift(-shift_steps)
         out[f"{resid_col}_shift"] = out[resid_col].shift(-shift_steps)
 

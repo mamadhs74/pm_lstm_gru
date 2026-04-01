@@ -175,9 +175,10 @@ def main():
             true_col = f"{t0}_shift"
 
             if ema_col in test_df.columns and true_col in test_df.columns:
-                y_ema = test_df.iloc[end_idxs][ema_col].to_numpy(dtype=float)
+                y_ema_log = test_df.iloc[end_idxs][ema_col].to_numpy(dtype=float)
                 y_true_total = test_df.iloc[end_idxs][true_col].to_numpy(dtype=float)
-                y_pred_total = y_ema + y_pred_resid
+                y_pred_log = y_ema_log + y_pred_resid
+                y_pred_total = np.expm1(y_pred_log)
 
                 pred_phys_df[f"{base0}_true"] = y_true_total
                 pred_phys_df[f"{base0}_pred"] = y_pred_total
