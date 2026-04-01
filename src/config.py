@@ -28,15 +28,8 @@ class Config:
     "acc_long_ms2",
     "acc_lat_ms2",
     "steer_rate_deg_s",
-    "yaw_deg_s",
-    "wheel_fl_kmh",
-    "wheel_fr_kmh",
-    "wheel_rl_kmh",
-    "wheel_rr_kmh",
     "dv",
     "jerk",
-    "acc_long_ema",
-    "load_transfer_proxy",
     ]
 
     target_cols = ["P_VA"]
@@ -54,7 +47,7 @@ class Config:
     batch_size: int = 256
     max_epochs: int = 120
     early_stopping_patience: int = 12
-    lr: float = 2e-4
+    lr: float = 3e-4
     weight_decay: float = 1e-5
 
     # Optional: heteroscedastic head (predict mean & variance)
