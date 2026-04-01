@@ -176,12 +176,11 @@ def main():
             true_col = f"{t0}_shift"
 
             if ema_col in test_df.columns and true_col in test_df.columns:
-                y_ema_log = test_df.iloc[end_idxs][ema_col].to_numpy(dtype=float)
+                y_ema = test_df.iloc[end_idxs][ema_col].to_numpy(dtype=float)
                 y_true_total = test_df.iloc[end_idxs][true_col].to_numpy(dtype=float)
 
-                baseline_pred_total = np.expm1(y_ema_log)
-                y_pred_log = y_ema_log + y_pred_resid
-                y_pred_total = np.expm1(y_pred_log)
+                y_pred_total = y_ema * (1.0 + y_pred_resid)
+                baseline_pred_total = y_ema
 
                 baseline_mae = float(np.mean(np.abs(y_true_total - baseline_pred_total)))
                 baseline_rmse = float(np.sqrt(np.mean((y_true_total - baseline_pred_total) ** 2)))
@@ -198,6 +197,8 @@ def main():
                       float(np.sqrt(np.mean((y_true_total - y_pred_total) ** 2))))
 
                 # time-series comparison
+                baseline_pred_total = y_ema
+
                 N = min(300, len(y_true_total))
                 plt.figure(figsize=(10, 4))
                 plt.plot(y_true_total[:N], label="True")

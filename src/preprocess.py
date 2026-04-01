@@ -121,16 +121,11 @@ def build_residual_targets(df: pd.DataFrame, cfg):
     T = 120.0
     alpha = dt / (T + dt)
     out = df.copy()
-
     for col in cfg.target_cols:
-        log_col = f"{col}_log1p"
         ema_col = f"{col}_ema120"
         resid_col = f"{col}_resid"
-
-        out[log_col] = np.log1p(out[col].astype(float))
-        out[ema_col] = out[log_col].ewm(alpha=alpha, adjust=False).mean()
-        out[resid_col] = out[log_col] - out[ema_col]
-
+        out[ema_col] = out[col].ewm(alpha=alpha, adjust=False).mean()
+        out[resid_col] = (out[col] - out[ema_col]) / (np.abs(out[ema_col]) + 1e-6)
     return out
 
 def shift_ema_targets(df: pd.DataFrame, cfg):

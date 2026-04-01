@@ -26,8 +26,6 @@ class Config:
     feature_cols = [
         "speed_kmh",
         "acc_long_ms2",
-        "brake_bar",
-        "yaw_deg_s",
         "acc_lat_ms2",
         "steer_rate_deg_s",
         "wheel_fl_kmh",
