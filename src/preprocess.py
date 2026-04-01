@@ -118,7 +118,7 @@ def apply_transformers(df: pd.DataFrame, scaler: RobustScaler, cfg):
 
 def build_residual_targets(df: pd.DataFrame, cfg):
     dt = 1.0 / cfg.target_hz
-    T = 120.0
+    T = 20
     alpha = dt / (T + dt)
     out = df.copy()
     for col in cfg.target_cols:
