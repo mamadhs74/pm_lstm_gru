@@ -118,14 +118,14 @@ def apply_transformers(df: pd.DataFrame, scaler: RobustScaler, cfg):
 
 def build_residual_targets(df: pd.DataFrame, cfg):
     dt = 1.0 / cfg.target_hz
-    T = 2.0
+    T = 2
     alpha = dt / (T + dt)
     out = df.copy()
     for col in cfg.target_cols:
         ema_col = f"{col}_ema120"
         resid_col = f"{col}_resid"
         out[ema_col] = out[col].ewm(alpha=alpha, adjust=False).mean()
-        out[resid_col] = out[col] - out[ema_col]
+        out[resid_col] = (out[col] - out[ema_col]) / (np.abs(out[ema_col]) + 1e-6)
     return out
 
 def shift_ema_targets(df: pd.DataFrame, cfg):

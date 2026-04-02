@@ -8,14 +8,14 @@ class Config:
     # data_path: str = "data/processed/1_clean.csv"
     data_path: str = "data/processed/1_clean_decimal_fixed.csv"
     processed_dir: str = "data/processed"
-    seed: int = 42
+    seed: int = 20
     target_mode: str = "residual_shift"   # "direct" | "residual_shift" | "physics_residual_shift"
     # ---- sampling & windowing ----
     orig_hz: int = 10
     target_hz: int = 5
-    window_s: int = 20         
+    window_s: int = 5         
     target_shift_s: int = 1     # predict t+20 s
-    stride_steps: int = 5     
+    stride_steps: int = 4  #4 is the best 
 
         # ---- CV / splitting ----
     n_folds: int = 5
@@ -30,7 +30,7 @@ class Config:
     "steer_rate_deg_s",
     "dv",
     "jerk",
-    ]
+     ]
 
     target_cols = ["P_VA"]
     # target_cols = ["PM1_count", "PM2_5_count", "PM10_count"]
@@ -40,15 +40,15 @@ class Config:
     dropout: float = 0.05
 
     # ---- TCN-specific ----
-    tcn_channels = (64, 64, 64, 64)   # deeper stack for ~40–90 s receptive field
+    tcn_channels = (256, 256, 256, 256)   # deeper stack for ~40–90 s receptive field
     tcn_kernel_size: int = 3
 
     # ---- training ----
     batch_size: int = 256
-    max_epochs: int = 120
+    max_epochs: int = 256
     early_stopping_patience: int = 12
-    lr: float = 3e-4
-    weight_decay: float = 1e-5
+    lr: float = 5e-4
+    weight_decay: float = 2e-5
 
     # Optional: heteroscedastic head (predict mean & variance)
     use_heteroscedastic: bool = False
@@ -56,7 +56,7 @@ class Config:
 
     # loss / weights
     use_huber: bool = True
-    huber_delta: float = 1.0
+    huber_delta: float = 5
     regime_weights = {"idle": 1.2, "brake": 1.8, "cruise": 1.0}  # (optional tweak)
 
     # ---- CV / splitting ----
