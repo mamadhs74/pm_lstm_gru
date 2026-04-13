@@ -18,6 +18,23 @@ from src.report_more import (
     plot_target_physics_hybrid_acf,
 )
 
+def plot_abs_error_comparison(
+    y_true: np.ndarray,
+    y_base: np.ndarray,
+    y_pred: np.ndarray,
+    out_png: str,
+    title: str,
+) -> None:
+    plt.figure(figsize=(10, 4))
+    plt.plot(np.abs(y_true - y_base), label="Baseline absolute error")
+    plt.plot(np.abs(y_true - y_pred), label="Model absolute error")
+    plt.xlabel("Sample")
+    plt.ylabel("Absolute error")
+    plt.title(title)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=150)
+    plt.close()
 
 def _base_name(col: str) -> str:
     return col.split("_ug")[0] if "_ug" in col else col
@@ -181,7 +198,13 @@ def main():
 
                 y_pred_total = y_ema * (1.0 + y_pred_resid)
                 baseline_pred_total = y_ema
-
+                plot_abs_error_comparison(
+                    y_true=y_true_total,
+                    y_base=baseline_pred_total,
+                    y_pred=y_pred_total,
+                    out_png=f"figures/abs_error_compare_{base0.lower()}.png",
+                    title=f"{base0}: baseline vs model absolute error"
+                )
                 baseline_mae = float(np.mean(np.abs(y_true_total - baseline_pred_total)))
                 baseline_rmse = float(np.sqrt(np.mean((y_true_total - baseline_pred_total) ** 2)))
 
