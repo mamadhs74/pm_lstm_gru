@@ -25,3 +25,4 @@ figures/
 
 # Ignore Windows ADS sidecar files
 *:[Zz]one.Identifier
+src/ap6_ap7_outputs/
