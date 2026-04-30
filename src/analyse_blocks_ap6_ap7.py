@@ -3,62 +3,71 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 
 DATA_PATH = "data/processed/1_clean_decimal_fixed.csv"
-PRED_COL = "P_VA"
-TIME_COL = "Zeitstempel"
+
+TIME_COL = "Time_since_midnight_UTC"
+
+TRUE_COL = "P_VA"
+PRED_COL = "P_VA_pred"  # change this to your real prediction column name
 
 OUT_DIR = Path("ap6_ap7_outputs")
 OUT_DIR.mkdir(exist_ok=True)
 
 df = pd.read_csv(DATA_PATH)
+df[TIME_COL] = pd.to_numeric(df[TIME_COL], errors="coerce")
 
-df[TIME_COL] = pd.to_datetime(df[TIME_COL], format="%H:%M:%S")
+print("Columns:", df.columns.tolist())
+print("Time range:", df[TIME_COL].min(), df[TIME_COL].max())
 
 blocks = {
-    "Block 1 - Beschleunigung": ("10:33:00", "10:37:00"),
-    "Block 2 - Verzögerung": ("10:43:00", "10:47:00"),
-    "Block 3 - Kurvenfahrt": ("10:51:00", "10:56:00"),
-    "Block 9 - Cruise": ("11:26:00", "11:32:00"),
+    "Block 1 - Beschleunigung": (10*3600 + 33*60, 10*3600 + 37*60),
+    "Block 2 - Verzögerung": (10*3600 + 43*60, 10*3600 + 47*60),
+    "Block 3 - Kurvenfahrt": (10*3600 + 51*60, 10*3600 + 56*60),
+    "Block 9 - Cruise": (11*3600 + 26*60, 11*3600 + 32*60),
 }
 
 results = []
 
-plt.figure(figsize=(12, 5))
-
 for name, (start, end) in blocks.items():
-    start = pd.to_datetime(start, format="%H:%M:%S")
-    end = pd.to_datetime(end, format="%H:%M:%S")
-
     block = df[(df[TIME_COL] >= start) & (df[TIME_COL] <= end)].copy()
 
     if block.empty:
         print(f"WARNING: no data found for {name}")
         continue
 
+    block["relative_time_s"] = block[TIME_COL] - start
+
+    mae = (block[TRUE_COL] - block[PRED_COL]).abs().mean()
+    rmse = ((block[TRUE_COL] - block[PRED_COL]) ** 2).mean() ** 0.5
+
     results.append({
         "Block": name,
-        "Start": start.strftime("%H:%M:%S"),
-        "End": end.strftime("%H:%M:%S"),
-        "Mean": block[PRED_COL].mean(),
-        "Max": block[PRED_COL].max(),
-        "Std": block[PRED_COL].std(),
+        "Start_s": start,
+        "End_s": end,
+        "Mean_true": block[TRUE_COL].mean(),
+        "Mean_pred": block[PRED_COL].mean(),
+        "Max_true": block[TRUE_COL].max(),
+        "Max_pred": block[PRED_COL].max(),
+        "MAE": mae,
+        "RMSE": rmse,
         "N_samples": len(block),
     })
 
-    plt.plot(block[TIME_COL], block[PRED_COL], label=name)
+    plt.figure(figsize=(10, 4))
+    plt.plot(block["relative_time_s"], block[TRUE_COL], label="Measured")
+    plt.plot(block["relative_time_s"], block[PRED_COL], label="Predicted")
+    plt.title(name)
+    plt.xlabel("Time within block [s]")
+    plt.ylabel(TRUE_COL)
+    plt.legend()
+    plt.tight_layout()
+
+    safe_name = name.replace(" ", "_").replace("-", "").replace("ä", "ae")
+    plt.savefig(OUT_DIR / f"{safe_name}_true_vs_pred.png", dpi=300)
+    plt.close()
 
 results_df = pd.DataFrame(results)
 results_df.to_csv(OUT_DIR / "ap6_ap7_block_statistics.csv", index=False)
 
-plt.title("Particle-emission response across driving scenarios")
-plt.xlabel("Time")
-plt.ylabel(PRED_COL)
-plt.legend()
-plt.xticks(rotation=45)
-plt.tight_layout()
-plt.savefig(OUT_DIR / "ap6_ap7_block_plot.png", dpi=300)
-
-print("\nSaved:")
-print(OUT_DIR / "ap6_ap7_block_statistics.csv")
-print(OUT_DIR / "ap6_ap7_block_plot.png")
 print("\nStatistics:")
 print(results_df)
+print("\nSaved outputs to:", OUT_DIR)
