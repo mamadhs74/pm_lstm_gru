@@ -2,12 +2,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-DATA_PATH = "data/processed/1_clean_decimal_fixed.csv"
-
+DATA_PATH = "data/processed/test_predictions_p_va_physical.csv"
+TRUE_COL = "P_VA_true"
+PRED_COL = "P_VA_pred"
 TIME_COL = "Time_since_midnight_UTC"
-
-TRUE_COL = "P_VA"
-PRED_COL = "P_VA_pred"  # change this to your real prediction column name
 
 OUT_DIR = Path("ap6_ap7_outputs")
 OUT_DIR.mkdir(exist_ok=True)
@@ -19,10 +17,10 @@ print("Columns:", df.columns.tolist())
 print("Time range:", df[TIME_COL].min(), df[TIME_COL].max())
 
 blocks = {
-    "Block 1 - Beschleunigung": (10*3600 + 33*60, 10*3600 + 37*60),
-    "Block 2 - Verzögerung": (10*3600 + 43*60, 10*3600 + 47*60),
-    "Block 3 - Kurvenfahrt": (10*3600 + 51*60, 10*3600 + 56*60),
-    "Block 9 - Cruise": (11*3600 + 26*60, 11*3600 + 32*60),
+    "Block 1 - Beschleunigung": (8*3600 + 33*60, 8*3600 + 37*60),
+    "Block 2 - Verzögerung": (8*3600 + 43*60, 8*3600 + 47*60),
+    "Block 3 - Kurvenfahrt": (8*3600 + 51*60, 8*3600 + 56*60),
+    "Block 9 - Cruise": (9*3600 + 26*60, 9*3600 + 32*60),
 }
 
 results = []
@@ -53,8 +51,8 @@ for name, (start, end) in blocks.items():
     })
 
     plt.figure(figsize=(10, 4))
-    plt.plot(block["relative_time_s"], block[TRUE_COL], label="Measured")
-    plt.plot(block["relative_time_s"], block[PRED_COL], label="Predicted")
+    plt.plot(block[TIME_COL], block[TRUE_COL], label=f"{name} true")
+    plt.plot(block[TIME_COL], block[PRED_COL], "--", label=f"{name} predicted")
     plt.title(name)
     plt.xlabel("Time within block [s]")
     plt.ylabel(TRUE_COL)

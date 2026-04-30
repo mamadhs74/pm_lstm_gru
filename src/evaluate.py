@@ -134,6 +134,11 @@ def main():
 
     display_names = cfg.target_cols
     pred_df = _predict_df(model, test_ds, device, display_names, test_df_for_phys=test_df)
+    end_idxs = [e - 1 for (s, e) in test_ds.indices]
+
+    for col in ["Time_since_midnight_UTC", "Zeitstempel", "X_Achse_[s]"]:
+        if col in test_df.columns:
+            pred_df[col] = test_df.iloc[end_idxs][col].to_numpy()
 
     if pred_df.empty:
         print("No test windows; nothing to evaluate.")
@@ -213,6 +218,11 @@ def main():
 
                 pred_phys_df[f"{base0}_true"] = y_true_total
                 pred_phys_df[f"{base0}_pred"] = y_pred_total
+                for col in ["Time_since_midnight_UTC", "Zeitstempel", "X_Achse_[s]"]:
+                    if col in test_df.columns:
+                        pred_phys_df[col] = test_df.iloc[end_idxs][col].to_numpy()
+
+                pred_phys_df.to_csv(f"data/processed/test_predictions_{base0.lower()}_physical.csv", index=False)
 
                 print(f"Test MAE ({base0}, EMA hybrid units):",
                       float(np.mean(np.abs(y_true_total - y_pred_total))))
