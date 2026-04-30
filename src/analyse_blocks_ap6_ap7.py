@@ -2,7 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-DATA_PATH = "data/processed/test_predictions_p_va_physical.csv"
+DATA_PATH = "data/processed/all_predictions_p_va_physical.csv"
 TRUE_COL = "P_VA_true"
 PRED_COL = "P_VA_pred"
 TIME_COL = "Time_since_midnight_UTC"

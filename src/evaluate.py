@@ -99,7 +99,10 @@ def main():
     print("cfg.target_cols:", cfg.target_cols)
     print("resolved_target_cols(cfg):", targ_cols)
 
-    test_df = splits["test"].reset_index(drop=True)
+    test_df = pd.concat(
+        [splits["train"], splits["val"], splits["test"]],
+        ignore_index=True
+    ).reset_index(drop=True)
     test_ds = WindowedDataset(test_df, feat_cols, targ_cols, window, stride)
 
     feats = resolved_feature_cols(cfg)
@@ -144,7 +147,7 @@ def main():
         print("No test windows; nothing to evaluate.")
         return
 
-    out_csv = "data/processed/test_predictions_residuals.csv"
+    out_csv = "data/processed/all_predictions_residuals.csv"
     pred_df.to_csv(out_csv, index=False)
 
     overall_mae = {
@@ -222,7 +225,7 @@ def main():
                     if col in test_df.columns:
                         pred_phys_df[col] = test_df.iloc[end_idxs][col].to_numpy()
 
-                pred_phys_df.to_csv(f"data/processed/test_predictions_{base0.lower()}_physical.csv", index=False)
+                pred_phys_df.to_csv(f"data/processed/all_predictions_{base0.lower()}_physical.csv", index=False)
 
                 print(f"Test MAE ({base0}, EMA hybrid units):",
                       float(np.mean(np.abs(y_true_total - y_pred_total))))
