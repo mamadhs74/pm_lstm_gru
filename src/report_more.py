@@ -18,13 +18,12 @@ def binned_mae(y_true, y_pred, by, nbins, out_png):
     import numpy as np
     import pandas as pd
     import matplotlib.pyplot as plt
-    n = len(np.asarray(y_true).ravel())
-    if n == 0:
+
+    if len(np.asarray(y_true).ravel()) == 0:
         return
-    window = min(window, max(5, n // 5))
 
     df = pd.DataFrame({"y_true": y_true, "y_pred": y_pred, "by": by})
-    
+
     if pd.Series(by).nunique(dropna=True) < 3:
         plt.figure(figsize=(6, 3))
         plt.text(0.5, 0.5, "Too few unique values for binned MAE", ha="center", va="center")
@@ -327,6 +326,11 @@ def rolling_mae(y_true, y_pred, window, out_png):
     """
     Rolling mean absolute error with a given window length (samples).
     """
+    n = len(np.asarray(y_true).ravel())
+    if n == 0:
+        return
+    window = min(window, max(5, n // 5))
+
     y_true = pd.Series(np.asarray(y_true).ravel())
     y_pred = pd.Series(np.asarray(y_pred).ravel())
     mae = (y_true - y_pred).abs()
@@ -341,8 +345,6 @@ def rolling_mae(y_true, y_pred, window, out_png):
     plt.tight_layout()
     plt.savefig(out_png, dpi=150)
     plt.close()
-
-
 # ----------------------------------------------------
 # 4) Brake-onset average residuals (event-triggered)
 # ----------------------------------------------------
@@ -354,12 +356,8 @@ def _find_brake_onsets(brake_series):
     onsets = np.where((prev == 0) & (b == 1))[0]
     return onsets
 
-def brake_onset_average(aligned_df, pred_df, pre_s, post_s, hz):
-    """
-    Compute average PM2.5 residual around brake onset events.
-    Returns a DataFrame with time axis and mean residual.
-    """
-    resid = pred_df["PM2_5_true"].values - pred_df["PM2_5_pred"].values
+def brake_onset_average(aligned_df, pred_df, pre_s, post_s, hz, target_short):
+    resid = pred_df[f"{target_short}_true"].values - pred_df[f"{target_short}_pred"].values
     b = aligned_df["brake"] if "brake" in aligned_df.columns else aligned_df.get("brake_event", 0)
     onsets = _find_brake_onsets(b)
 
@@ -389,7 +387,7 @@ def plot_brake_onset_average(avg_df, out_png):
     plt.plot(avg_df["t_s"], avg_df["mean_resid"])
     plt.axvline(0.0, color="k", linestyle="--", linewidth=1)
     plt.xlabel("Time since brake onset (s)")
-    plt.ylabel("Mean residual (PM2.5)")
+    plt.ylabel(f"Mean residual ({target_short})")
     plt.title("Brake-Onset Average Residual")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -506,6 +504,8 @@ def permutation_feature_importance(model, loader, feat_names, out_png, max_batch
             xb[:, :, f_idx] = xb[perm, :, f_idx]
 
             yp = model(xb)
+            if isinstance(yp, (tuple, list)):
+                yp = yp[0]
             pert_errs.append(torch.mean(torch.abs(yp - yb)).item())
 
         deltas.append((name, float(np.mean(pert_errs) - base_err)))
@@ -522,3 +522,25 @@ def permutation_feature_importance(model, loader, feat_names, out_png, max_batch
     plt.tight_layout()
     plt.savefig(out_png, dpi=150)
     plt.close()
+
+def summarize_regression(y_true, y_pred):
+    import numpy as np
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+    e = np.asarray(y_true) - np.asarray(y_pred)
+    mae = float(mean_absolute_error(y_true, y_pred))
+    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    rng = float(np.max(y_true) - np.min(y_true))
+    nrmse = float(rmse / rng) if rng > 0 else np.nan
+    r2 = float(r2_score(y_true, y_pred))
+    bias = float(np.mean(e))
+    estd = float(np.std(e))
+
+    return {
+        "MAE": mae,
+        "RMSE": rmse,
+        "NRMSE": nrmse,
+        "R2": r2,
+        "Bias": bias,
+        "ResidualStd": estd,
+    }

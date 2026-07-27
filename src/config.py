@@ -9,18 +9,28 @@ class Config:
     data_path: str = "data/processed/1_clean_decimal_fixed.csv"
     processed_dir: str = "data/processed"
     seed: int = 20
+    # Publication repetitions
+    seeds = (10, 20, 30, 40, 50)
+
+    # Evaluation regimes
+    evaluation_scope: str = "active"
+    stationary_speed_threshold_kmh: float = 1.0
+    stationary_acc_threshold_ms2: float = 0.2
+    stationary_min_duration_s: int = 60
+
+    # A 180 s purge leaves almost no validation data in this short recording.
+    evaluation_purge_seconds: int = 30
     target_mode: str = "residual_shift"   # "direct" | "residual_shift" | "physics_residual_shift"
     # ---- sampling & windowing ----
     orig_hz: int = 10
     target_hz: int = 5
-    window_s: int = 5         
-    target_shift_s: int = 1     # predict t+20 s
+    window_s: int = 6       
+    target_shift_s: int = 1     # predict 1 s ahead = 5 samples at 5 Hz
     stride_steps: int = 4  #4 is the best 
 
         # ---- CV / splitting ----
-    n_folds: int = 5
-    purge_seconds: int = 60
-    use_timeseries_cv: bool = True
+   
+    use_timeseries_cv: bool = False
 
     # ---- feature/target columns (clean CSV names) ----
     feature_cols = [
@@ -44,7 +54,7 @@ class Config:
     tcn_kernel_size: int = 3
 
     # ---- training ----
-    batch_size: int = 256
+    batch_size: int = 300
     max_epochs: int = 256
     early_stopping_patience: int = 12
     lr: float = 5e-4
@@ -126,17 +136,18 @@ class Config:
 
 
 def resolved_feature_cols(cfg: Config):
-    # Training used ONLY the 12 base features.
+    # Training uses the six features listed in feature_cols.
     return cfg.feature_cols
 
 
 def resolved_target_cols(cfg):
     if getattr(cfg, "target_mode", "direct") == "direct":
-        return cfg.target_cols
+        return [f"{t}_shift" for t in cfg.target_cols]
     if cfg.target_mode == "residual_shift":
         return [f"{t}_resid_shift" for t in cfg.target_cols]
     if cfg.target_mode == "physics_residual_shift":
         return [f"{t}_resid_phys_shift" for t in cfg.target_cols]
     raise ValueError(f"Unknown target_mode={cfg.target_mode}")
+
 
 cfg = Config()

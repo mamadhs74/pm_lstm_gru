@@ -1,31 +1,38 @@
-# src/train.py
+import json
 import os
-import pickle
+import random
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
+from torch.nn import GaussianNLLLoss
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from rich import print
 
 from .grad_viz import make_writer, log_gradients_tb
-from .config import cfg, resolved_feature_cols, resolved_target_cols
+from .config import (
+    cfg,
+    resolved_feature_cols,
+    resolved_target_cols,
+)
 from .preprocess import prepare_frames
 from .datasets import make_loaders, WindowedDataset
 from .models import RNNRegressor, TCNRegressor
 from .metrics import mae, HuberLoss
-from .visualize import plot_training_curves, plot_grad_norms
+from .visualize import (
+    plot_training_curves,
+    plot_grad_norms,
+)
 
 
-def set_seed(seed: int):
-    import random
+def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
@@ -33,324 +40,498 @@ def set_seed(seed: int):
 
 
 def load_csv(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path)
-    return df.dropna(subset=cfg.target_cols)
+    frame = pd.read_csv(path)
+    return frame.dropna(subset=cfg.target_cols)
 
 
-@torch.no_grad()
-def predict_loader_to_df(model, loader, display_target_cols, device):
-    model.eval()
-    ys_true, ys_pred = [], []
-    for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)
-        yp = model(xb)
-        if isinstance(yp, (tuple, list)):
-            yp = yp[0]
-        ys_true.append(yb.cpu().numpy())
-        ys_pred.append(yp.cpu().numpy())
+def build_model(device):
+    features = resolved_feature_cols(cfg)
+    targets = resolved_target_cols(cfg)
 
-    if not ys_true:
-        return pd.DataFrame()
-
-    ytrue, ypred = np.vstack(ys_true), np.vstack(ys_pred)
-    out = pd.DataFrame()
-    for i, c in enumerate(display_target_cols):
-        base = c.split("_ug")[0]
-        out[f"{base}_true"] = ytrue[:, i]
-        out[f"{base}_pred"] = ypred[:, i]
-    return out
-
-
-@torch.no_grad()
-def compute_val_physical_mae(model, val_df, device):
-    """
-    Compute validation MAE in reconstructed physical space.
-
-    This version is written for:
-        cfg.target_mode == "residual_shift"
-
-    Reconstruction:
-        y_pred_total = y_ema_shift * (1 + pred_residual)
-    """
-    if getattr(cfg, "target_mode", "direct") != "residual_shift":
-        raise ValueError(
-            "compute_val_physical_mae currently supports only target_mode='residual_shift'."
-        )
-
-    model.eval()
-
-    feats = resolved_feature_cols(cfg)
-    targs = resolved_target_cols(cfg)
-    window = int(cfg.window_s * cfg.target_hz)
-    stride = int(cfg.stride_steps)
-
-    val_ds = WindowedDataset(val_df, feats, targs, window, stride)
-    if len(val_ds) == 0:
-        return float("inf")
-
-    pin = torch.cuda.is_available()
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.batch_size,
-        shuffle=False,
-        drop_last=False,
-        num_workers=2,
-        pin_memory=pin,
-    )
-
-    scaler_path = Path(".runs/target_scaler.pkl")
-    if not scaler_path.exists():
-        raise FileNotFoundError(
-            "Missing .runs/target_scaler.pkl. Run prepare_frames/train setup first."
-        )
-
-    with open(scaler_path, "rb") as f:
-        target_scaler = pickle.load(f)
-
-    preds_scaled = []
-    for xb, yb in val_loader:
-        xb = xb.to(device)
-        yp = model(xb)
-        if isinstance(yp, (tuple, list)):
-            yp = yp[0]
-        preds_scaled.append(yp.detach().cpu().numpy())
-
-    if not preds_scaled:
-        return float("inf")
-
-    y_pred_scaled = np.vstack(preds_scaled)
-    y_pred_resid = target_scaler.inverse_transform(y_pred_scaled)
-
-    end_idxs = [e - 1 for (s, e) in val_ds.indices]
-
-    # Current codebase uses single-target P_VA. Keep logic robust for multi-target too.
-    maes = []
-    for i, t0 in enumerate(cfg.target_cols):
-        ema_col = f"{t0}_ema120_shift"
-        true_col = f"{t0}_shift"
-
-        if ema_col not in val_df.columns or true_col not in val_df.columns:
-            raise KeyError(
-                f"Validation reconstruction needs columns '{ema_col}' and '{true_col}'."
-            )
-
-        y_ema = val_df.iloc[end_idxs][ema_col].to_numpy(dtype=float)
-        y_true = val_df.iloc[end_idxs][true_col].to_numpy(dtype=float)
-        pred_resid = y_pred_resid[:, i]
-
-        y_pred = y_ema * (1.0 + pred_resid)
-        mae_i = float(np.mean(np.abs(y_true - y_pred)))
-        maes.append(mae_i)
-
-    return float(np.mean(maes))
-
-
-def build_model(device, feats, targs):
-    mt = cfg.model_type.lower()
-
-    if mt in ("lstm", "gru"):
+    if cfg.model_type.lower() in ("lstm", "gru"):
         return RNNRegressor(
-            input_size=len(feats),
+            input_size=len(features),
             hidden_size=cfg.hidden_size,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
             rnn_type=cfg.model_type,
             conv_frontend=cfg.conv_frontend,
             conv_channels=cfg.conv_channels,
-            out_dim=len(targs),
+            out_dim=len(targets),
         ).to(device)
 
-    if mt == "tcn":
+    if cfg.model_type.lower() == "tcn":
         return TCNRegressor(
-            input_size=len(feats),
-            out_dim=len(targs),
-            channels_list=getattr(cfg, "tcn_channels", (64, 64, 64)),
-            kernel_size=getattr(cfg, "tcn_kernel_size", 3),
+            input_size=len(features),
+            out_dim=len(targets),
+            channels_list=cfg.tcn_channels,
+            kernel_size=cfg.tcn_kernel_size,
             dropout=cfg.dropout,
         ).to(device)
 
-    raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
+    raise ValueError(
+        f"Unknown cfg.model_type={cfg.model_type}"
+    )
 
 
-def train_one_split(train_df, val_df, device):
-    os.makedirs("figures", exist_ok=True)
-    os.makedirs("runs", exist_ok=True)
-    os.makedirs(".runs", exist_ok=True)
+def train_one_split(
+    train_df,
+    val_df,
+    device,
+):
+    run_dir = (
+        Path("publication_results")
+        / "training"
+        / cfg.target_mode
+        / f"seed_{cfg.seed}"
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
 
-    train_loader, val_loader = make_loaders(train_df, val_df, cfg)
-    n_train = len(train_loader.dataset) if hasattr(train_loader, "dataset") else 0
-    n_val = len(val_loader.dataset) if hasattr(val_loader, "dataset") else 0
-    print(f"[debug] windows -> train: {n_train}, val: {n_val}")
+    train_loader, val_loader = make_loaders(
+        train_df,
+        val_df,
+        cfg,
+    )
+
+    n_train = len(train_loader.dataset)
+    n_val = len(val_loader.dataset)
+
+    print(
+        f"[debug] windows -> train: {n_train}, "
+        f"val: {n_val}"
+    )
 
     if n_train == 0 or n_val == 0:
-        raise RuntimeError("No windows in train/val. Adjust window/shift/CSV length.")
-
-    feats = resolved_feature_cols(cfg)
-    targs = resolved_target_cols(cfg)
-    model = build_model(device, feats, targs)
-
-    run_name = f"{cfg.model_type}_hz{cfg.target_hz}_win{cfg.window_s}"
-    writer: SummaryWriter = make_writer(logdir="runs", run_name=run_name)
-
-    opt = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-    sch = CosineAnnealingLR(opt, T_max=cfg.max_epochs)
-
-    use_hetero = bool(getattr(cfg, "use_heteroscedastic", False)) and cfg.model_type.lower() == "tcn"
-    if use_hetero:
-        raise NotImplementedError(
-            "This train.py version is set up for standard residual regression. "
-            "Heteroscedastic mode is not enabled here."
+        raise RuntimeError(
+            "No train/validation windows."
         )
-    else:
-        criterion = HuberLoss(cfg.huber_delta) if cfg.use_huber else mae
-        print("[info] using", "Huber loss" if cfg.use_huber else "MAE loss")
 
-    # best_val now means best PHYSICAL validation MAE
+    model = build_model(device)
+
+    run_name = (
+        f"{cfg.model_type}_"
+        f"{cfg.target_mode}_"
+        f"seed{cfg.seed}_"
+        f"hz{cfg.target_hz}_"
+        f"win{cfg.window_s}"
+    )
+
+    writer: SummaryWriter = make_writer(
+        logdir="runs",
+        run_name=run_name,
+    )
+
+    optimizer = AdamW(
+        model.parameters(),
+        lr=cfg.lr,
+        weight_decay=cfg.weight_decay,
+    )
+    scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=cfg.max_epochs,
+    )
+
+    use_heterogeneous = (
+        bool(cfg.use_heteroscedastic)
+        and cfg.model_type.lower() == "tcn"
+    )
+
+    if use_heterogeneous:
+        criterion = GaussianNLLLoss(full=True)
+        print("[info] using Gaussian NLL")
+    else:
+        criterion = (
+            HuberLoss(cfg.huber_delta)
+            if cfg.use_huber
+            else mae
+        )
+        print(
+            "[info] using",
+            "Huber loss" if cfg.use_huber else "MAE",
+        )
+
     best_val = float("inf")
     best_state = None
-    global_step = 0
-    patience = getattr(cfg, "early_stopping_patience", 10)
+    best_epoch = None
     no_improve = 0
+    global_step = 0
 
-    epoch_train_losses, epoch_val_losses, grad_norms = [], [], []
+    train_losses = []
+    val_losses = []
+    gradient_norms = []
 
-    print(" starting training loop")
     try:
         for epoch in range(cfg.max_epochs):
-            # ======= TRAIN =======
             model.train()
-            batch_losses, batch_grad_norms = [], []
+            batch_losses = []
+            batch_gradient_norms = []
 
             for xb, yb in train_loader:
-                xb, yb = xb.to(device), yb.to(device)
-                opt.zero_grad(set_to_none=True)
+                xb = xb.to(device)
+                yb = yb.to(device)
 
-                pred = model(xb)
-                if isinstance(pred, (tuple, list)):
-                    pred = pred[0]
+                optimizer.zero_grad(set_to_none=True)
 
-                loss = criterion(pred, yb)
+                if use_heterogeneous:
+                    mu, log_variance = model(xb)
+                    variance = (
+                        torch.exp(log_variance)
+                        .clamp_min(1e-6)
+                    )
+                    loss = criterion(
+                        mu,
+                        yb,
+                        variance,
+                    )
+                else:
+                    prediction = model(xb)
+                    loss = criterion(
+                        prediction,
+                        yb,
+                    )
 
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                opt.step()
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    1.0,
+                )
+                optimizer.step()
 
                 if global_step % 50 == 0:
-                    log_gradients_tb(writer, model, step=global_step)
+                    log_gradients_tb(
+                        writer,
+                        model,
+                        step=global_step,
+                    )
 
-                total_sq = 0.0
-                for p in model.parameters():
-                    if p.grad is not None:
-                        g = p.grad.detach().flatten()
-                        total_sq += float(torch.dot(g, g))
-                batch_grad_norms.append(np.sqrt(total_sq))
-                batch_losses.append(float(loss.detach().cpu()))
+                squared_norm = 0.0
+                for parameter in model.parameters():
+                    if parameter.grad is not None:
+                        gradient = (
+                            parameter.grad
+                            .detach()
+                            .flatten()
+                        )
+                        squared_norm += float(
+                            torch.dot(
+                                gradient,
+                                gradient,
+                            )
+                        )
+
+                batch_gradient_norms.append(
+                    np.sqrt(squared_norm)
+                )
+                batch_losses.append(
+                    float(loss.detach().cpu())
+                )
                 global_step += 1
 
-            # ======= VALIDATION LOSS IN RESIDUAL SPACE =======
             model.eval()
-            vloss = []
+            validation_batch_losses = []
+
             with torch.no_grad():
                 for xb, yb in val_loader:
-                    xb, yb = xb.to(device), yb.to(device)
-                    pred = model(xb)
-                    if isinstance(pred, (tuple, list)):
-                        pred = pred[0]
-                    vloss.append(criterion(pred, yb).item())
+                    xb = xb.to(device)
+                    yb = yb.to(device)
 
-            mtrain = float(np.mean(batch_losses)) if batch_losses else float("nan")
-            mval = float(np.mean(vloss)) if vloss else float("nan")
-            epoch_train_losses.append(mtrain)
-            epoch_val_losses.append(mval)
-            grad_norms.append(float(np.mean(batch_grad_norms)) if batch_grad_norms else float("nan"))
+                    if use_heterogeneous:
+                        mu, log_variance = model(xb)
+                        variance = (
+                            torch.exp(log_variance)
+                            .clamp_min(1e-6)
+                        )
+                        validation_loss = criterion(
+                            mu,
+                            yb,
+                            variance,
+                        )
+                    else:
+                        validation_loss = criterion(
+                            model(xb),
+                            yb,
+                        )
 
-            writer.add_scalar("loss/train", mtrain, epoch)
-            writer.add_scalar("loss/val_residual", mval, epoch)
+                    validation_batch_losses.append(
+                        float(validation_loss.item())
+                    )
 
-            # ======= VALIDATION MODEL SELECTION IN PHYSICAL SPACE =======
-            val_phys_mae = compute_val_physical_mae(model, val_df, device)
-            writer.add_scalar("metric/val_physical_mae", val_phys_mae, epoch)
-
-            print(
-                f" epoch {epoch:03d} | train {mtrain:.4f} | "
-                f"val_loss {mval:.4f} | val_phys_mae {val_phys_mae:.4f}"
+            mean_train = float(
+                np.mean(batch_losses)
+            )
+            mean_val = float(
+                np.mean(validation_batch_losses)
+            )
+            mean_gradient = float(
+                np.mean(batch_gradient_norms)
             )
 
-            sch.step()
+            train_losses.append(mean_train)
+            val_losses.append(mean_val)
+            gradient_norms.append(mean_gradient)
 
-            if val_phys_mae < best_val:
-                best_val = val_phys_mae
-                best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+            writer.add_scalar(
+                "loss/train",
+                mean_train,
+                epoch,
+            )
+            writer.add_scalar(
+                "loss/val",
+                mean_val,
+                epoch,
+            )
+
+            print(
+                f"epoch {epoch:03d} | "
+                f"train {mean_train:.4f} | "
+                f"val {mean_val:.4f}"
+            )
+
+            scheduler.step()
+
+            if mean_val < best_val:
+                best_val = mean_val
+                best_epoch = epoch
+                best_state = {
+                    key: value.detach().cpu()
+                    for key, value
+                    in model.state_dict().items()
+                }
                 no_improve = 0
             else:
                 no_improve += 1
-                if no_improve >= patience:
-                    print(f"[early stop] no val improvement for {patience} epochs; stopping at epoch {epoch}.")
+
+                if (
+                    no_improve
+                    >= cfg.early_stopping_patience
+                ):
+                    print(
+                        "[early stop] no validation "
+                        f"improvement for "
+                        f"{cfg.early_stopping_patience} "
+                        f"epochs; stopping at {epoch}."
+                    )
                     break
 
     finally:
-        plot_training_curves(epoch_train_losses, epoch_val_losses, "figures/training_curves.png")
-        plot_grad_norms(grad_norms, "figures/grad_norms.png")
+        history = pd.DataFrame({
+            "epoch": range(len(train_losses)),
+            "train_loss": train_losses,
+            "val_loss": val_losses,
+            "gradient_norm": gradient_norms,
+        })
+        history.to_csv(
+            run_dir / "training_history.csv",
+            index=False,
+        )
+
+        plot_training_curves(
+            train_losses,
+            val_losses,
+            str(run_dir / "training_curves.png"),
+        )
+        plot_grad_norms(
+            gradient_norms,
+            str(run_dir / "gradient_norms.png"),
+        )
         writer.close()
 
     if best_state is None:
-        raise RuntimeError("Training finished without a saved best_state.")
+        raise RuntimeError(
+            "Training produced no valid checkpoint."
+        )
 
-    return {"val": best_val, "state": best_state}
+    return {
+        "val": best_val,
+        "state": best_state,
+        "best_epoch": best_epoch,
+        "run_dir": run_dir,
+    }
 
 
 def main():
-    set_seed(cfg.seed)
-    os.makedirs("figures", exist_ok=True)
-    os.makedirs("runs", exist_ok=True)
-    os.makedirs(".runs", exist_ok=True)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f" device: {device}")
-
-    df = load_csv(cfg.data_path)
-    print(f" loaded {len(df)} rows from {cfg.data_path}")
-    splits = prepare_frames(df)
-
-    window = int(cfg.window_s * cfg.target_hz)
-    stride = cfg.stride_steps
-    feats = resolved_feature_cols(cfg)
-    targs = resolved_target_cols(cfg)
-
-    counts = {}
-    for name in ["train", "val", "test"]:
-        ds = WindowedDataset(splits[name], feats, targs, window, stride)
-        counts[name] = (len(splits[name]), len(ds))
-    print(f" rows/windows -> {counts}")
-
-    best = train_one_split(splits["train"], splits["val"], device)
-
-    ckpt = f".runs/{cfg.model_type}_best.pt"
-    torch.save(best["state"], ckpt)
-    print(f" saved best model to {ckpt}")
-    print(f" best validation physical MAE = {best['val']:.6f}")
-
-    # quick sanity check: reload best model and verify output dimensionality
-    pin = torch.cuda.is_available()
-    val_ds = WindowedDataset(splits["val"], feats, targs, window, stride)
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=cfg.batch_size,
-        shuffle=False,
-        drop_last=False,
-        num_workers=2,
-        pin_memory=pin,
+    cfg.seed = int(
+        os.getenv(
+            "RUN_SEED",
+            str(cfg.seed),
+        )
+    )
+    cfg.target_mode = os.getenv(
+        "RUN_TARGET_MODE",
+        cfg.target_mode,
     )
 
-    model = build_model(device, feats, targs)
-    model.load_state_dict(torch.load(ckpt, map_location=device))
+    maximum_epochs_override = os.getenv(
+        "RUN_MAX_EPOCHS"
+    )
+    if maximum_epochs_override:
+        cfg.max_epochs = int(
+            maximum_epochs_override
+        )
+
+    set_seed(cfg.seed)
+
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
+
+    print("device:", device)
+    print("seed:", cfg.seed)
+    print("target mode:", cfg.target_mode)
+
+    frame = load_csv(cfg.data_path)
+    print(
+        f"loaded {len(frame)} rows "
+        f"from {cfg.data_path}"
+    )
+
+    splits = prepare_frames(frame)
+
+    window = int(
+        cfg.window_s * cfg.target_hz
+    )
+    stride = int(cfg.stride_steps)
+    features = resolved_feature_cols(cfg)
+    targets = resolved_target_cols(cfg)
+
+    counts = {}
+    for name in [
+        "train",
+        "val",
+        "test",
+        "stationary_test",
+    ]:
+        dataset = WindowedDataset(
+            splits[name],
+            features,
+            targets,
+            window,
+            stride,
+        )
+        counts[name] = {
+            "rows": int(len(splits[name])),
+            "windows": int(len(dataset)),
+        }
+
+    print("rows/windows:", counts)
+
+    result = train_one_split(
+        splits["train"],
+        splits["val"],
+        device,
+    )
+
+    checkpoint_name = (
+        f"{cfg.model_type}_"
+        f"{cfg.target_mode}_"
+        f"seed{cfg.seed}_best.pt"
+    )
+    checkpoint_path = (
+        Path(".runs") / checkpoint_name
+    )
+
+    torch.save(
+        result["state"],
+        checkpoint_path,
+    )
+    torch.save(
+        result["state"],
+        result["run_dir"] / "checkpoint.pt",
+    )
+
+    manifest = {
+        "seed": cfg.seed,
+        "target_mode": cfg.target_mode,
+        "model_type": cfg.model_type,
+        "feature_cols": list(features),
+        "resolved_target_cols": list(targets),
+        "orig_hz": cfg.orig_hz,
+        "target_hz": cfg.target_hz,
+        "window_s": cfg.window_s,
+        "window_samples": window,
+        "target_shift_s": cfg.target_shift_s,
+        "forecast_samples": int(
+            cfg.target_shift_s
+            * cfg.target_hz
+        ),
+        "stride_steps": cfg.stride_steps,
+        "tcn_channels": list(
+            cfg.tcn_channels
+        ),
+        "tcn_kernel_size": (
+            cfg.tcn_kernel_size
+        ),
+        "dropout": cfg.dropout,
+        "batch_size": cfg.batch_size,
+        "maximum_epochs": cfg.max_epochs,
+        "early_stopping_patience": (
+            cfg.early_stopping_patience
+        ),
+        "learning_rate": cfg.lr,
+        "weight_decay": cfg.weight_decay,
+        "loss": (
+            "Huber"
+            if cfg.use_huber
+            else "MAE"
+        ),
+        "huber_delta": cfg.huber_delta,
+        "best_epoch": result["best_epoch"],
+        "best_validation_loss": result["val"],
+        "checkpoint": str(checkpoint_path),
+        "split_counts": counts,
+        "split_manifest": splits.get(
+            "_split_manifest",
+            {},
+        ),
+        "device": str(device),
+    }
+
+    with open(
+        result["run_dir"] / "run_manifest.json",
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(
+            manifest,
+            handle,
+            indent=2,
+        )
+
+    # Check that the saved state reloads correctly.
+    validation_dataset = WindowedDataset(
+        splits["val"],
+        features,
+        targets,
+        window,
+        stride,
+    )
+
+    validation_loader = torch.utils.data.DataLoader(
+        validation_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+    )
+
+    check_model = build_model(device)
+    check_model.load_state_dict(
+        torch.load(
+            checkpoint_path,
+            map_location=device,
+        )
+    )
 
     with torch.no_grad():
-        xb0, _ = next(iter(val_loader))
-        y0 = model(xb0.to(device))
-        if isinstance(y0, (tuple, list)):
-            y0 = y0[0]
-        assert y0.shape[-1] == len(targs), f"Model outputs {y0.shape[-1]} dims, expected {len(targs)}"
+        xb, _ = next(iter(validation_loader))
+        output = check_model(xb.to(device))
+
+    assert output.shape[-1] == len(targets)
+
+    print(
+        "saved best model to",
+        checkpoint_path,
+    )
 
 
 if __name__ == "__main__":

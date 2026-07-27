@@ -1,414 +1,629 @@
+import json
+import os
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+)
 from torch.utils.data import DataLoader
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import matplotlib.pyplot as plt
 
-from src.config import cfg, resolved_feature_cols, resolved_target_cols
+from src.config import (
+    cfg,
+    resolved_feature_cols,
+    resolved_target_cols,
+)
 from src.preprocess import prepare_frames
 from src.datasets import WindowedDataset
-from src.models import RNNRegressor, TCNRegressor
-from src.visualize import plot_overlay, plot_parity, plot_residual_hist
-from src.diagnostics import regime_metrics
-from src.report_more import (
-    residual_autocorr,
-    plot_error_acf_panel,
-    plot_target_acf,
-    plot_target_physics_hybrid_acf,
+from src.models import (
+    RNNRegressor,
+    TCNRegressor,
 )
 
-def plot_abs_error_comparison(
-    y_true: np.ndarray,
-    y_base: np.ndarray,
-    y_pred: np.ndarray,
-    out_png: str,
-    title: str,
-) -> None:
-    plt.figure(figsize=(10, 4))
-    plt.plot(np.abs(y_true - y_base), label="Baseline absolute error")
-    plt.plot(np.abs(y_true - y_pred), label="Model absolute error")
-    plt.xlabel("Sample")
-    plt.ylabel("Absolute error")
-    plt.title(title)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=150)
-    plt.close()
 
-def _base_name(col: str) -> str:
-    return col.split("_ug")[0] if "_ug" in col else col
+def build_model(device):
+    features = resolved_feature_cols(cfg)
+    targets = resolved_target_cols(cfg)
 
-
-@torch.no_grad()
-def _predict_df(model, ds, device, display_names, test_df_for_phys=None):
-    loader = DataLoader(ds, batch_size=cfg.batch_size, shuffle=False, drop_last=False)
-    truths, preds = [], []
-
-    for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)
-        yp = model(xb)
-        if isinstance(yp, (tuple, list)):
-            yp = yp[0]
-        truths.append(yb.detach().cpu().numpy())
-        preds.append(yp.detach().cpu().numpy())
-
-    if not truths:
-        return pd.DataFrame()
-
-    ytrue = np.vstack(truths)
-    ypred = np.vstack(preds)
-
-    out = {}
-    for i, disp in enumerate(display_names):
-        base = _base_name(disp)
-        out[f"{base}_true"] = ytrue[:, i]
-        out[f"{base}_pred"] = ypred[:, i]
-
-    df_pred = pd.DataFrame(out)
-
-    if test_df_for_phys is not None:
-        end_idxs = [e - 1 for (s, e) in ds.indices]
-        phys_cols = [f"{_base_name(t)}_phys" for t in display_names]
-        have_all_phys = all(c in test_df_for_phys.columns for c in phys_cols)
-        if have_all_phys:
-            for t in display_names:
-                base = _base_name(t)
-                phys = test_df_for_phys.iloc[end_idxs][f"{base}_phys"].to_numpy(dtype=float)
-                df_pred[f"{base}_phys"] = phys
-                df_pred[f"{base}_pred_total"] = phys + df_pred[f"{base}_pred"].to_numpy(dtype=float)
-
-    return df_pred
-
-
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    from pathlib import Path
-    Path("figures").mkdir(parents=True, exist_ok=True)
-    Path("data/processed").mkdir(parents=True, exist_ok=True)
-
-    raw = pd.read_csv(cfg.data_path).dropna(subset=cfg.target_cols)
-    splits = prepare_frames(raw)
-
-    window = int(cfg.window_s * cfg.target_hz)
-    stride = int(cfg.stride_steps)
-    feat_cols = resolved_feature_cols(cfg)
-    targ_cols = resolved_target_cols(cfg)
-
-    print("cfg.target_cols:", cfg.target_cols)
-    print("resolved_target_cols(cfg):", targ_cols)
-
-    test_df = pd.concat(
-        [splits["train"], splits["val"], splits["test"]],
-        ignore_index=True
-    ).reset_index(drop=True)
-    test_ds = WindowedDataset(test_df, feat_cols, targ_cols, window, stride)
-
-    feats = resolved_feature_cols(cfg)
-    targs = resolved_target_cols(cfg)
-
-    mt = cfg.model_type.lower()
-    if mt in ("lstm", "gru"):
-        model = RNNRegressor(
-            input_size=len(feats),
+    if cfg.model_type.lower() in ("lstm", "gru"):
+        return RNNRegressor(
+            input_size=len(features),
             hidden_size=cfg.hidden_size,
             num_layers=cfg.num_layers,
             dropout=cfg.dropout,
             rnn_type=cfg.model_type,
             conv_frontend=cfg.conv_frontend,
             conv_channels=cfg.conv_channels,
-            out_dim=len(targs),
+            out_dim=len(targets),
         ).to(device)
-    elif mt == "tcn":
-        model = TCNRegressor(
-            input_size=len(feats),
-            out_dim=len(targs),
-            channels_list=getattr(cfg, "tcn_channels", (64, 64, 64)),
-            kernel_size=getattr(cfg, "tcn_kernel_size", 3),
+
+    if cfg.model_type.lower() == "tcn":
+        return TCNRegressor(
+            input_size=len(features),
+            out_dim=len(targets),
+            channels_list=cfg.tcn_channels,
+            kernel_size=cfg.tcn_kernel_size,
             dropout=cfg.dropout,
         ).to(device)
-    else:
-        raise ValueError(f"Unknown cfg.model_type={cfg.model_type}")
 
-    ckpt = f".runs/{cfg.model_type}_best.pt"
-    model.load_state_dict(torch.load(ckpt, map_location=device))
+    raise ValueError(
+        f"Unknown model type: {cfg.model_type}"
+    )
+
+
+def metric_row(
+    model_name,
+    y_true,
+    y_pred,
+):
+    y_true = np.asarray(
+        y_true,
+        dtype=float,
+    )
+    y_pred = np.asarray(
+        y_pred,
+        dtype=float,
+    )
+
+    mae_value = float(
+        mean_absolute_error(
+            y_true,
+            y_pred,
+        )
+    )
+    rmse_value = float(
+        np.sqrt(
+            mean_squared_error(
+                y_true,
+                y_pred,
+            )
+        )
+    )
+    r2_value = float(
+        r2_score(
+            y_true,
+            y_pred,
+        )
+    )
+    value_range = float(
+        np.max(y_true) - np.min(y_true)
+    )
+    nrmse_value = (
+        float(rmse_value / value_range)
+        if value_range > 0
+        else float("nan")
+    )
+    bias_value = float(
+        np.mean(y_pred - y_true)
+    )
+
+    return {
+        "model": model_name,
+        "mae": mae_value,
+        "rmse": rmse_value,
+        "r2": r2_value,
+        "nrmse_range": nrmse_value,
+        "bias": bias_value,
+        "n_predictions": int(len(y_true)),
+    }
+
+
+@torch.no_grad()
+def predict_scaled(
+    model,
+    dataset,
+    device,
+):
+    loader = DataLoader(
+        dataset,
+        batch_size=cfg.batch_size,
+        shuffle=False,
+        drop_last=False,
+    )
+
+    truths = []
+    predictions = []
+
     model.eval()
 
-    display_names = cfg.target_cols
-    pred_df = _predict_df(model, test_ds, device, display_names, test_df_for_phys=test_df)
-    end_idxs = [e - 1 for (s, e) in test_ds.indices]
+    for xb, yb in loader:
+        output = model(xb.to(device))
 
-    for col in ["Time_since_midnight_UTC", "Zeitstempel", "X_Achse_[s]"]:
-        if col in test_df.columns:
-            pred_df[col] = test_df.iloc[end_idxs][col].to_numpy()
+        if isinstance(output, (tuple, list)):
+            output = output[0]
 
-    if pred_df.empty:
-        print("No test windows; nothing to evaluate.")
-        return
+        truths.append(
+            yb.detach().cpu().numpy()
+        )
+        predictions.append(
+            output.detach().cpu().numpy()
+        )
 
-    out_csv = "data/processed/all_predictions_residuals.csv"
-    pred_df.to_csv(out_csv, index=False)
+    if not truths:
+        raise RuntimeError(
+            "Evaluation dataset contains no windows."
+        )
 
-    overall_mae = {
-        _base_name(t): float(np.abs(pred_df[f"{_base_name(t)}_true"] - pred_df[f"{_base_name(t)}_pred"]).mean())
-        for t in display_names
+    return (
+        np.vstack(truths),
+        np.vstack(predictions),
+    )
+
+
+def main():
+    cfg.seed = int(
+        os.getenv(
+            "RUN_SEED",
+            str(cfg.seed),
+        )
+    )
+    cfg.target_mode = os.getenv(
+        "RUN_TARGET_MODE",
+        cfg.target_mode,
+    )
+    cfg.evaluation_scope = os.getenv(
+        "RUN_EVAL_SCOPE",
+        cfg.evaluation_scope,
+    )
+
+    if cfg.evaluation_scope not in {
+        "active",
+        "stationary",
+    }:
+        raise ValueError(
+            "RUN_EVAL_SCOPE must be active "
+            "or stationary."
+        )
+
+    split_key = (
+        "test"
+        if cfg.evaluation_scope == "active"
+        else "stationary_test"
+    )
+
+    device = torch.device(
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
+    )
+
+    raw = (
+        pd.read_csv(cfg.data_path)
+        .dropna(subset=cfg.target_cols)
+    )
+    splits = prepare_frames(raw)
+
+    evaluation_frame = (
+        splits[split_key]
+        .reset_index(drop=True)
+    )
+
+    features = resolved_feature_cols(cfg)
+    targets = resolved_target_cols(cfg)
+    window = int(
+        cfg.window_s * cfg.target_hz
+    )
+    stride = int(cfg.stride_steps)
+
+    dataset = WindowedDataset(
+        evaluation_frame,
+        features,
+        targets,
+        window,
+        stride,
+    )
+
+    if len(dataset) == 0:
+        raise RuntimeError(
+            f"{split_key} contains no windows."
+        )
+
+    model = build_model(device)
+
+    checkpoint_path = Path(".runs") / (
+        f"{cfg.model_type}_"
+        f"{cfg.target_mode}_"
+        f"seed{cfg.seed}_best.pt"
+    )
+
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Checkpoint not found: "
+            f"{checkpoint_path}"
+        )
+
+    model.load_state_dict(
+        torch.load(
+            checkpoint_path,
+            map_location=device,
+        )
+    )
+
+    y_true_scaled, y_pred_scaled = (
+        predict_scaled(
+            model,
+            dataset,
+            device,
+        )
+    )
+
+    target_scaler = splits["_target_scaler"]
+
+    y_true_model = (
+        target_scaler
+        .inverse_transform(y_true_scaled)
+        .ravel()
+    )
+    y_pred_model = (
+        target_scaler
+        .inverse_transform(y_pred_scaled)
+        .ravel()
+    )
+
+    end_indices = np.asarray(
+        [
+            end - 1
+            for start, end in dataset.indices
+        ],
+        dtype=int,
+    )
+
+    base_target = cfg.target_cols[0]
+
+    physical_truth_column = (
+        f"{base_target}_future_physical"
+    )
+    ema_column = (
+        f"{base_target}_ema120_shift"
+    )
+
+    required_columns = [
+        base_target,
+        physical_truth_column,
+        ema_column,
+    ]
+    missing = [
+        column
+        for column in required_columns
+        if column not in evaluation_frame.columns
+    ]
+
+    if missing:
+        raise RuntimeError(
+            f"Missing evaluation columns: {missing}"
+        )
+
+    y_true = (
+        evaluation_frame
+        .iloc[end_indices][physical_truth_column]
+        .to_numpy(dtype=float)
+    )
+
+    # Persistence forecast: current measurement at t.
+    y_persistence = (
+        evaluation_frame
+        .iloc[end_indices][base_target]
+        .to_numpy(dtype=float)
+    )
+
+    # Causal EMA available at prediction time t.
+    y_ema = (
+        evaluation_frame
+        .iloc[end_indices][ema_column]
+        .to_numpy(dtype=float)
+    )
+
+    if cfg.target_mode == "direct":
+        y_model = y_pred_model
+        model_name = "direct_tcn"
+
+        direct_truth_difference = float(
+            np.max(
+                np.abs(
+                    y_true_model - y_true
+                )
+            )
+        )
+
+        if direct_truth_difference > 1e-5:
+            raise RuntimeError(
+                "Direct-target inverse transform "
+                "does not match physical truth."
+            )
+
+    elif cfg.target_mode == "residual_shift":
+        y_model = (
+            y_ema
+            + (np.abs(y_ema) + 1e-6)
+            * y_pred_model
+        )
+        model_name = "ema_residual_tcn"
+
+    else:
+        raise ValueError(
+            "Publication evaluation supports "
+            "direct and residual_shift."
+        )
+
+    output_dir = (
+        Path("publication_results")
+        / cfg.evaluation_scope
+        / cfg.target_mode
+        / f"seed_{cfg.seed}"
+    )
+    output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    predictions = pd.DataFrame({
+        "original_end_row_in_split": end_indices,
+        "y_true": y_true,
+        "persistence": y_persistence,
+        "causal_ema": y_ema,
+        model_name: y_model,
+    })
+
+    for column in [
+        "Time_since_midnight_UTC",
+        "Zeitstempel",
+        "X_Achse_[s]",
+        "time_s",
+        "speed_kmh_physical",
+        "acc_long_ms2_physical",
+        "acc_lat_ms2_physical",
+        "steer_rate_deg_s_physical",
+    ]:
+        if column in evaluation_frame.columns:
+            predictions[column] = (
+                evaluation_frame
+                .iloc[end_indices][column]
+                .to_numpy()
+            )
+
+    predictions.to_csv(
+        output_dir
+        / "test_predictions_physical.csv",
+        index=False,
+    )
+
+    rows = [
+        metric_row(
+            "persistence",
+            y_true,
+            y_persistence,
+        ),
+        metric_row(
+            "causal_ema",
+            y_true,
+            y_ema,
+        ),
+        metric_row(
+            model_name,
+            y_true,
+            y_model,
+        ),
+    ]
+
+    metrics = pd.DataFrame(rows)
+    metrics.insert(
+        0,
+        "target",
+        base_target,
+    )
+    metrics.insert(
+        1,
+        "evaluation_scope",
+        cfg.evaluation_scope,
+    )
+    metrics.insert(
+        2,
+        "target_mode",
+        cfg.target_mode,
+    )
+    metrics.insert(
+        3,
+        "seed",
+        cfg.seed,
+    )
+
+    metrics.to_csv(
+        output_dir / "metrics.csv",
+        index=False,
+    )
+
+    speed = (
+        predictions["speed_kmh_physical"]
+        if "speed_kmh_physical"
+        in predictions.columns
+        else pd.Series(dtype=float)
+    )
+    acc_long = (
+        predictions["acc_long_ms2_physical"]
+        if "acc_long_ms2_physical"
+        in predictions.columns
+        else pd.Series(dtype=float)
+    )
+    acc_lat = (
+        predictions["acc_lat_ms2_physical"]
+        if "acc_lat_ms2_physical"
+        in predictions.columns
+        else pd.Series(dtype=float)
+    )
+
+    regime_summary = {
+        "evaluation_scope": cfg.evaluation_scope,
+        "split_key": split_key,
+        "rows": int(len(evaluation_frame)),
+        "windows": int(len(dataset)),
+        "target_mean": float(np.mean(y_true)),
+        "target_std": float(np.std(y_true)),
+        "target_min": float(np.min(y_true)),
+        "target_max": float(np.max(y_true)),
+        "target_above_100": int(
+            np.sum(y_true > 100)
+        ),
+        "target_above_500": int(
+            np.sum(y_true > 500)
+        ),
     }
-    print("Test MAE (residual/model space):", overall_mae)
 
-    end_idxs = [e - 1 for (s, e) in test_ds.indices]
-    aligned = test_df.iloc[end_idxs].reset_index(drop=True).copy()
-
-    t0 = cfg.target_cols[0]
-    base0 = _base_name(t0)
-
-    target_scaler = splits.get("_target_scaler", None)
-    pred_phys_df = None
-    baseline_mae = np.nan
-    baseline_rmse = np.nan
-
-    if target_scaler is not None and len(display_names) == 1:
-        y_true_scaled = pred_df[f"{base0}_true"].to_numpy().reshape(-1, 1)
-        y_pred_scaled = pred_df[f"{base0}_pred"].to_numpy().reshape(-1, 1)
-
-        y_true_resid = target_scaler.inverse_transform(y_true_scaled).ravel()
-        y_pred_resid = target_scaler.inverse_transform(y_pred_scaled).ravel()
-
-        pred_phys_df = pd.DataFrame({
-            f"{base0}_true_resid": y_true_resid,
-            f"{base0}_pred_resid": y_pred_resid,
+    if len(speed):
+        regime_summary.update({
+            "speed_mean_kmh": float(
+                speed.mean()
+            ),
+            "speed_max_kmh": float(
+                speed.max()
+            ),
+            "moving_predictions_speed_ge_1": int(
+                (speed >= 1.0).sum()
+            ),
         })
 
-        phys_shift_col = f"{base0}_phys_shift"
-        true_shift_col = f"{t0}_shift"
+    if len(acc_long):
+        regime_summary[
+            "acc_long_abs_max_ms2"
+        ] = float(
+            acc_long.abs().max()
+        )
 
-        if phys_shift_col in test_df.columns and true_shift_col in test_df.columns:
-            y_phys = test_df.iloc[end_idxs][phys_shift_col].to_numpy(dtype=float)
-            y_true_total = test_df.iloc[end_idxs][true_shift_col].to_numpy(dtype=float)
-            y_pred_total = y_phys + y_pred_resid
+    if len(acc_lat):
+        regime_summary[
+            "acc_lat_abs_max_ms2"
+        ] = float(
+            acc_lat.abs().max()
+        )
 
-            pred_phys_df[f"{base0}_phys"] = y_phys
-            pred_phys_df[f"{base0}_true"] = y_true_total
-            pred_phys_df[f"{base0}_pred"] = y_pred_total
+    with open(
+        output_dir / "regime_summary.json",
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(
+            regime_summary,
+            handle,
+            indent=2,
+        )
 
-            print(f"Test MAE ({base0}, physical hybrid units):",
-                  float(np.mean(np.abs(y_true_total - y_pred_total))))
-            print(f"Test RMSE ({base0}, physical hybrid units):",
-                  float(np.sqrt(np.mean((y_true_total - y_pred_total) ** 2))))
+    run_manifest = {
+        "checkpoint": str(checkpoint_path),
+        "seed": cfg.seed,
+        "target_mode": cfg.target_mode,
+        "evaluation_scope": (
+            cfg.evaluation_scope
+        ),
+        "split_key": split_key,
+        "feature_cols": list(features),
+        "resolved_target_cols": list(targets),
+        "window_s": cfg.window_s,
+        "window_samples": window,
+        "forecast_horizon_s": (
+            cfg.target_shift_s
+        ),
+        "forecast_samples": int(
+            cfg.target_shift_s
+            * cfg.target_hz
+        ),
+        "stride_steps": cfg.stride_steps,
+        "batch_size": cfg.batch_size,
+        "split_manifest": splits.get(
+            "_split_manifest",
+            {},
+        ),
+    }
 
-        else:
-            ema_col = f"{t0}_ema120_shift"
-            true_col = f"{t0}_shift"
+    with open(
+        output_dir / "run_manifest.json",
+        "w",
+        encoding="utf-8",
+    ) as handle:
+        json.dump(
+            run_manifest,
+            handle,
+            indent=2,
+        )
 
-            if ema_col in test_df.columns and true_col in test_df.columns:
-                y_ema = test_df.iloc[end_idxs][ema_col].to_numpy(dtype=float)
-                y_true_total = test_df.iloc[end_idxs][true_col].to_numpy(dtype=float)
-
-                y_pred_total = y_ema * (1.0 + y_pred_resid)
-                baseline_pred_total = y_ema
-                plot_abs_error_comparison(
-                    y_true=y_true_total,
-                    y_base=baseline_pred_total,
-                    y_pred=y_pred_total,
-                    out_png=f"figures/abs_error_compare_{base0.lower()}.png",
-                    title=f"{base0}: baseline vs model absolute error"
-                )
-                baseline_mae = float(np.mean(np.abs(y_true_total - baseline_pred_total)))
-                baseline_rmse = float(np.sqrt(np.mean((y_true_total - baseline_pred_total) ** 2)))
-
-                print(f"Baseline MAE ({base0}, EMA only):", baseline_mae)
-                print(f"Baseline RMSE ({base0}, EMA only):", baseline_rmse)
-
-                pred_phys_df[f"{base0}_true"] = y_true_total
-                pred_phys_df[f"{base0}_pred"] = y_pred_total
-                for col in ["Time_since_midnight_UTC", "Zeitstempel", "X_Achse_[s]"]:
-                    if col in test_df.columns:
-                        pred_phys_df[col] = test_df.iloc[end_idxs][col].to_numpy()
-
-                pred_phys_df.to_csv(f"data/processed/all_predictions_{base0.lower()}_physical.csv", index=False)
-
-                print(f"Test MAE ({base0}, EMA hybrid units):",
-                      float(np.mean(np.abs(y_true_total - y_pred_total))))
-                print(f"Test RMSE ({base0}, EMA hybrid units):",
-                      float(np.sqrt(np.mean((y_true_total - y_pred_total) ** 2))))
-
-                # time-series comparison
-                baseline_pred_total = y_ema
-
-                N = min(300, len(y_true_total))
-                plt.figure(figsize=(10, 4))
-                plt.plot(y_true_total[:N], label="True")
-                plt.plot(baseline_pred_total[:N], label="EMA baseline")
-                plt.plot(y_pred_total[:N], label="TCN prediction")
-                plt.xlabel("Sample")
-                plt.ylabel(base0)
-                plt.title(f"{base0}: True vs EMA baseline vs TCN")
-                plt.legend()
-                plt.tight_layout()
-                plt.savefig(f"figures/timeseries_compare_{base0.lower()}.png", dpi=150)
-                plt.close()
-
-            else:
-                print("ERROR: EMA baseline missing, cannot reconstruct physical signal")
-
-    if "brake" not in aligned.columns and "brake_event" in aligned.columns:
-        aligned["brake"] = aligned["brake_event"].astype(int)
-    if "idle" not in aligned.columns:
-        aligned["idle"] = 0
-    if "cruise" not in aligned.columns:
-        aligned["cruise"] = (
-            (aligned["idle"].astype(int) == 0) &
-            (aligned["brake"].astype(int) == 0)
-        ).astype(int)
-
-    merged = pd.concat([aligned, pred_df.reset_index(drop=True)], axis=1)
-    print("Regime metrics:", regime_metrics(merged))
-
-    residual_autocorr(
-        pred_df[f"{base0}_true"].to_numpy() - pred_df[f"{base0}_pred"].to_numpy(),
-        f"figures/fig_acf_{base0.lower()}_resid.png",
-        max_lag=200,
-        title=f"Residual-space error ACF ({base0})"
+    sample_count = min(
+        500,
+        len(y_true),
     )
 
-    try:
-        plot_target_acf(
-            aligned_df=aligned,
-            out_png=f"figures/fig_acf_target_{base0.lower()}.png",
-            target_short=base0,
-            max_lag=100,
-        )
-    except Exception as e:
-        print(f"[evaluate] Skipped target ACF: {e}")
-
-    try:
-        plot_target_physics_hybrid_acf(
-            aligned_df=aligned,
-            pred_df=pred_df,
-            out_png=f"figures/fig_acf_trio_{base0.lower()}.png",
-            target_short=base0,
-            max_lag=100,
-        )
-    except Exception as e:
-        print(f"[evaluate] Skipped trio ACF plot: {e}")
-
-    try:
-        plot_error_acf_panel(
-            aligned_df=aligned,
-            pred_df=pred_df,
-            out_png=f"figures/fig_acf_{base0.lower()}_error_panel.png",
-            target_short=base0,
-            max_lag=200
-        )
-    except Exception as e:
-        print(f"[evaluate] Skipped error ACF panel (likely missing physics or truth cols): {e}")
-
-    plot_overlay(pred_df, "figures/overlay_test_residuals.png", title="Test — residuals (true vs pred)")
-
-    plot_parity(
-        pred_df[f"{base0}_true"].values,
-        pred_df[f"{base0}_pred"].values,
-        f"figures/parity_{base0.lower()}_scaled_test.png",
-        title=f"Parity {base0} (scaled)"
+    plt.figure(figsize=(11, 4))
+    plt.plot(
+        y_true[:sample_count],
+        label="Measured",
     )
-    plot_residual_hist(
-        pred_df[f"{base0}_true"].values - pred_df[f"{base0}_pred"].values,
-        f"figures/resid_hist_{base0.lower()}_scaled_test.png",
-        title=f"Residual Histogram {base0} (scaled)"
+    plt.plot(
+        y_persistence[:sample_count],
+        label="Persistence",
     )
-
-    if pred_phys_df is not None and f"{base0}_true" in pred_phys_df.columns and f"{base0}_pred" in pred_phys_df.columns:
-        plot_parity(
-            pred_phys_df[f"{base0}_true"].values,
-            pred_phys_df[f"{base0}_pred"].values,
-            f"figures/parity_{base0.lower()}_physical_test.png",
-            title=f"Parity {base0} (physical units)"
-        )
-        plot_residual_hist(
-            pred_phys_df[f"{base0}_true"].values - pred_phys_df[f"{base0}_pred"].values,
-            f"figures/resid_hist_{base0.lower()}_physical_test.png",
-            title=f"Residual Histogram {base0} (physical units)"
-        )
-
-    if pred_phys_df is not None and f"{base0}_true" in pred_phys_df.columns and f"{base0}_pred" in pred_phys_df.columns:
-        y_true_eval = pred_phys_df[f"{base0}_true"].to_numpy()
-        y_pred_eval = pred_phys_df[f"{base0}_pred"].to_numpy()
-        metrics_space = "physical"
-    else:
-        y_true_eval = pred_df[f"{base0}_true"].to_numpy()
-        y_pred_eval = pred_df[f"{base0}_pred"].to_numpy()
-        metrics_space = "scaled"
-
-    mae_eval = float(mean_absolute_error(y_true_eval, y_pred_eval))
-    rmse_eval = float(np.sqrt(mean_squared_error(y_true_eval, y_pred_eval)))
-    r2_eval = float(r2_score(y_true_eval, y_pred_eval))
-    y_range = float(np.max(y_true_eval) - np.min(y_true_eval))
-    nrmse_eval = float(rmse_eval / y_range) if y_range > 0 else np.nan
-    bias_eval = float(np.mean(y_pred_eval - y_true_eval))
-
-    print("\n=== FINAL REPORT METRICS ===")
-    print("Space:", metrics_space)
-    print("MAE:", mae_eval)
-    print("RMSE:", rmse_eval)
-    print("R2:", r2_eval)
-    print("NRMSE:", nrmse_eval)
-    print("Bias:", bias_eval)
-
-    metrics_df = pd.DataFrame([{
-        "target": base0,
-        "space": metrics_space,
-        "model_mae": mae_eval,
-        "model_rmse": rmse_eval,
-        "model_r2": r2_eval,
-        "model_nrmse": nrmse_eval,
-        "model_bias": bias_eval,
-        "baseline_mae": baseline_mae,
-        "baseline_rmse": baseline_rmse,
-    }])
-
-    metrics_csv = f"data/processed/metrics_{base0.lower()}.csv"
-    metrics_df.to_csv(metrics_csv, index=False)
-
-    plt.figure(figsize=(8, 8))
-    plt.scatter(y_true_eval, y_pred_eval, alpha=0.5)
-    mn = float(min(y_true_eval.min(), y_pred_eval.min()))
-    mx = float(max(y_true_eval.max(), y_pred_eval.max()))
-    plt.plot([mn, mx], [mn, mx], "r--")
-    plt.xlabel("True")
-    plt.ylabel("Predicted")
-    plt.title(f"Actual vs Predicted — {base0} ({metrics_space})")
+    plt.plot(
+        y_ema[:sample_count],
+        label="Causal EMA",
+    )
+    plt.plot(
+        y_model[:sample_count],
+        label=model_name,
+    )
+    plt.xlabel("Prediction")
+    plt.ylabel(base_target)
+    plt.title(
+        f"{base_target} — "
+        f"{cfg.evaluation_scope} — "
+        f"seed {cfg.seed}"
+    )
+    plt.legend()
     plt.tight_layout()
-    actual_pred_png = f"figures/actual_vs_predicted_{base0.lower()}.png"
-    plt.savefig(actual_pred_png, dpi=150)
+    plt.savefig(
+        output_dir / "timeseries.png",
+        dpi=200,
+    )
     plt.close()
 
-    diag_path = f"figures/diagnostics_{base0.lower()}.txt"
-    with open(diag_path, "w", encoding="utf-8") as f:
-        f.write("=== Evaluation Diagnostics ===\n")
-        f.write(f"model_type: {cfg.model_type}\n")
-        f.write(f"target_cols: {cfg.target_cols}\n")
-        f.write(f"resolved_target_cols: {targ_cols}\n")
-        f.write(f"resolved_feature_cols: {feat_cols}\n")
-        f.write(f"window_s: {cfg.window_s}\n")
-        f.write(f"target_hz: {cfg.target_hz}\n")
-        f.write(f"stride_steps: {cfg.stride_steps}\n")
-        f.write(f"use_physics_baseline: {getattr(cfg, 'use_physics_baseline', None)}\n")
-        f.write(f"target_mode: {getattr(cfg, 'target_mode', 'direct')}\n")
-        f.write("\n=== Overall MAE (scaled/model space) ===\n")
-        f.write(str(overall_mae) + "\n")
-        f.write("\n=== Report Metrics ===\n")
-        f.write(metrics_df.to_string(index=False) + "\n")
-        f.write("\n=== Prediction summary (scaled/model space) ===\n")
-        f.write(pred_df.describe().to_string() + "\n")
-        if pred_phys_df is not None:
-            f.write("\n=== Prediction summary (physical space) ===\n")
-            f.write(pred_phys_df.describe().to_string() + "\n")
+    plt.figure(figsize=(6, 6))
+    plt.scatter(
+        y_true,
+        y_model,
+        s=12,
+        alpha=0.5,
+    )
+    minimum = float(
+        min(y_true.min(), y_model.min())
+    )
+    maximum = float(
+        max(y_true.max(), y_model.max())
+    )
+    plt.plot(
+        [minimum, maximum],
+        [minimum, maximum],
+        "--",
+    )
+    plt.xlabel("Measured")
+    plt.ylabel("Predicted")
+    plt.title(model_name)
+    plt.tight_layout()
+    plt.savefig(
+        output_dir / "parity.png",
+        dpi=200,
+    )
+    plt.close()
 
-    print("Wrote:")
-    print(f" - {out_csv}")
-    print(f" - {metrics_csv}")
-    print(f" - {actual_pred_png}")
-    print(f" - {diag_path}")
+    print("\n=== EVALUATION RESULTS ===")
+    print(metrics.to_string(index=False))
+    print("\n=== REGIME SUMMARY ===")
+    print(
+        json.dumps(
+            regime_summary,
+            indent=2,
+        )
+    )
+    print("\nWrote:", output_dir)
 
 
 if __name__ == "__main__":
