@@ -322,18 +322,35 @@ def main():
         y_model = y_pred_model
         model_name = "direct_tcn"
 
-        direct_truth_difference = float(
-            np.max(
-                np.abs(
-                    y_true_model - y_true
-                )
-            )
+        # Sanity check: in direct mode the model's target IS the
+        # physical value (P_VA_shift), so inverse-transforming the
+        # model's scaled ground truth must reconstruct
+        # evaluation_frame's physical column. WindowedDataset casts
+        # targets to float32 before the target_scaler round-trip, so
+        # a relative tolerance is required -- float32 rounding at
+        # P_VA's scale (~1e3) exceeds a 1e-5 absolute bound even with
+        # no real inconsistency.
+        direct_abs_error = np.abs(
+            y_true_model - y_true
+        )
+        direct_rel_error = (
+            direct_abs_error
+            / (np.abs(y_true) + 1e-6)
         )
 
-        if direct_truth_difference > 1e-5:
+        if not np.allclose(
+            y_true_model,
+            y_true,
+            rtol=1e-5,
+            atol=1e-3,
+        ):
             raise RuntimeError(
                 "Direct-target inverse transform "
-                "does not match physical truth."
+                "does not match physical truth. "
+                f"max abs error="
+                f"{float(np.max(direct_abs_error)):.6g}, "
+                f"max rel error="
+                f"{float(np.max(direct_rel_error)):.6g}"
             )
 
     elif cfg.target_mode == "residual_shift":
@@ -343,6 +360,42 @@ def main():
             * y_pred_model
         )
         model_name = "ema_residual_tcn"
+
+        # Sanity check: in residual_shift mode y_true_model is the
+        # inverse-transformed TRUE RESIDUAL RATIO, not a physical
+        # value -- comparing it directly to y_true (the direct-mode
+        # check) compares incommensurable quantities and always fails
+        # by ~100%. Instead reconstruct the physical value from the
+        # true residual with the same EMA formula used for
+        # predictions, and verify that matches physical truth.
+        r_true = y_true_model
+        residual_reconstructed_truth = (
+            y_ema
+            + (np.abs(y_ema) + 1e-6)
+            * r_true
+        )
+        residual_abs_error = np.abs(
+            residual_reconstructed_truth - y_true
+        )
+        residual_rel_error = (
+            residual_abs_error
+            / (np.abs(y_true) + 1e-6)
+        )
+
+        if not np.allclose(
+            residual_reconstructed_truth,
+            y_true,
+            rtol=1e-5,
+            atol=1e-3,
+        ):
+            raise RuntimeError(
+                "Residual-shift reconstruction from true "
+                "residual does not match physical truth. "
+                f"max abs error="
+                f"{float(np.max(residual_abs_error)):.6g}, "
+                f"max rel error="
+                f"{float(np.max(residual_rel_error)):.6g}"
+            )
 
     else:
         raise ValueError(
