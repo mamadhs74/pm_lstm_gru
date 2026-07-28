@@ -27,3 +27,7 @@ figures/
 *:[Zz]one.Identifier
 src/ap6_ap7_outputs/
 ap6_ap7_outputs/
+
+publication_results/
+publication_audit*/
+publication_original_run/
